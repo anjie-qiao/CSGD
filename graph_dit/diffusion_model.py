@@ -8,9 +8,12 @@ from models.transformer import Denoiser
 from diffusion.noise_schedule import PredefinedNoiseScheduleDiscrete, MarginalTransition
 
 from diffusion import diffusion_utils
-from metrics.train_loss import TrainLossDiscrete
+from metrics.train_loss import TrainLossScore
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 import utils
+
+import diffusion.graph_lib as graph_lib
+import diffusion.noise_lib as noise_lib
 
 class Graph_DiT(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools):
@@ -39,7 +42,7 @@ class Graph_DiT(pl.LightningModule):
         self.active_index = active_index
         self.dataset_info = dataset_infos
 
-        self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train)
+        self.train_loss = TrainLossScore(self.cfg.model.lambda_train)
 
         self.val_nll = NLL()
         self.val_X_kl = SumExceptBatchKL()
@@ -71,10 +74,8 @@ class Graph_DiT(pl.LightningModule):
                         Edim=self.Edim,
                         ydim=self.ydim,
                         task_type=dataset_infos.task_type)
-        
-        self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
-                                                              timesteps=cfg.model.diffusion_steps)
 
+        self.noise = noise_lib.get_noise(cfg)
 
         x_marginals = self.dataset_info.node_types.float() / torch.sum(self.dataset_info.node_types.float())
         
@@ -108,12 +109,17 @@ class Graph_DiT(pl.LightningModule):
         self.best_val_nll = 1e8
         self.val_counter = 0
         self.batch_size = self.cfg.train.batch_size
+
+        self.sampling_eps = cfg.noise.sampling_eps
+        self.graph = graph_lib.get_graph(cfg)
    
 
     def forward(self, noisy_data, unconditioned=False):
         x, e, y = noisy_data['X_t'].float(), noisy_data['E_t'].float(), noisy_data['y_t'].float().clone()
-        node_mask, t =  noisy_data['node_mask'], noisy_data['t']
-        pred = self.model(x, e, node_mask, y=y, t=t, unconditioned=unconditioned)
+        node_mask, t, sigma =  noisy_data['node_mask'], noisy_data['t'], noisy_data['sigma']
+        index_x, index_e = noisy_data['index_x'], noisy_data['index_e']
+        # in contionous-time diffusion, sigma replaces the timestep t as the condition
+        pred = self.model(x, e, node_mask, y=y, t=sigma, index_x=index_x, index_e=index_e, unconditioned=unconditioned)
         return pred
         
     def training_step(self, data, i):
@@ -128,9 +134,12 @@ class Graph_DiT(pl.LightningModule):
         noisy_data = self.apply_noise(X, E, data.y, node_mask)
         pred = self.forward(noisy_data)
         loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
-                            true_X=X, true_E=E, true_y=data.y, node_mask=node_mask,
+                            true_X=X, true_E=E, true_y=data.y, node_mask=node_mask, 
+                            noisy_data=noisy_data,
+                            sigma = noisy_data['sigma'],
+                            graph = self.graph,
                             log=i % self.log_every_steps == 0)
-
+           
         self.train_metrics(masked_pred_X=pred.X, masked_pred_E=pred.E, true_X=X, true_E=E,
                         log=i % self.log_every_steps == 0)
         self.log(f'loss', loss, batch_size=X.size(0), sync_dist=True)
@@ -164,11 +173,11 @@ class Graph_DiT(pl.LightningModule):
         self.train_metrics.log_epoch_metrics(self.current_epoch, log)
 
     def on_validation_epoch_start(self) -> None:
-        self.val_nll.reset()
-        self.val_X_kl.reset()
-        self.val_E_kl.reset()
-        self.val_X_logp.reset()
-        self.val_E_logp.reset()
+        # self.val_nll.reset()
+        # self.val_X_kl.reset()
+        # self.val_E_kl.reset()
+        # self.val_X_logp.reset()
+        # self.val_E_logp.reset()
         self.sampling_metrics.reset()
         self.val_y_collection = []
 
@@ -186,18 +195,18 @@ class Graph_DiT(pl.LightningModule):
         return {'loss': nll}
 
     def on_validation_epoch_end(self) -> None:
-        metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
-                   self.val_X_logp.compute(), self.val_E_logp.compute()]
+        # metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
+        #            self.val_X_logp.compute(), self.val_E_logp.compute()]
         
-        if self.current_epoch / self.trainer.max_epochs in [0.25, 0.5, 0.75, 1.0]:
-            print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f} -- ",
-                f"Val Edge type KL: {metrics[2] :.2f}", 'Val loss: %.2f \t Best :  %.2f\n' % (metrics[0], self.best_val_nll))
+        # if self.current_epoch / self.trainer.max_epochs in [0.25, 0.5, 0.75, 1.0]:
+        #     print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f} -- ",
+        #         f"Val Edge type KL: {metrics[2] :.2f}", 'Val loss: %.2f \t Best :  %.2f\n' % (metrics[0], self.best_val_nll))
 
-        # Log val nll with default Lightning logger, so it can be monitored by checkpoint callback
-        self.log("val/NLL",  metrics[0], sync_dist=True)
+        # # Log val nll with default Lightning logger, so it can be monitored by checkpoint callback
+        # self.log("val/NLL",  metrics[0], sync_dist=True)
 
-        if metrics[0] < self.best_val_nll:
-            self.best_val_nll = metrics[0]
+        # if metrics[0] < self.best_val_nll:
+        #     self.best_val_nll = metrics[0]
 
         self.val_counter += 1
         
@@ -248,11 +257,11 @@ class Graph_DiT(pl.LightningModule):
 
     def on_test_epoch_start(self) -> None:
         print("Starting test...")
-        self.test_nll.reset()
-        self.test_X_kl.reset()
-        self.test_E_kl.reset()
-        self.test_X_logp.reset()
-        self.test_E_logp.reset()
+        # self.test_nll.reset()
+        # self.test_X_kl.reset()
+        # self.test_E_kl.reset()
+        # self.test_X_logp.reset()
+        # self.test_E_logp.reset()
         self.test_y_collection = []
     
     @torch.no_grad()
@@ -270,11 +279,11 @@ class Graph_DiT(pl.LightningModule):
 
     def on_test_epoch_end(self) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
-        metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
-                   self.test_X_logp.compute(), self.test_E_logp.compute()]
+        # metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
+        #            self.test_X_logp.compute(), self.test_E_logp.compute()]
 
-        print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
-              f"Test Edge type KL: {metrics[2] :.2f}")
+        # print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
+        #       f"Test Edge type KL: {metrics[2] :.2f}")
 
         ## final epcoh
         samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
@@ -428,40 +437,35 @@ class Graph_DiT(pl.LightningModule):
 
     def apply_noise(self, X, E, y, node_mask):
         """ Sample noise and apply it to the data. """
+        # continuous time step sampling
+        bs, n, _ = X.shape
+        t = (1 - self.sampling_eps) * torch.rand(bs, device=X.device) + self.sampling_eps
+        # (bs)
+        sigma, dsigma = self.noise(t)
+        #(bs, N)
+        i_x = X.argmax(dim=-1) 
+        #(bs, N)
+        i_x_pert = self.graph.sample_transition(i_x, sigma[:, None])
+        #(bs, N, d)
+        X_t = F.one_hot(i_x_pert, num_classes=self.Xdim_output)
 
-        # Sample a timestep t.
-        # When evaluating, the loss for t=0 is computed separately
-        lowest_t = 0 if self.training else 1
-        t_int = torch.randint(lowest_t, self.T + 1, size=(X.size(0), 1), device=X.device).float()  # (bs, 1)
-        s_int = t_int - 1
+        #(bs, N, N)
+        i_e = E.argmax(dim=-1)
+        #(bs, N, N)
+        i_e_pert = self.graph.sample_transition(i_e,  sigma[:, None, None])
+        #(bs, N, N, d)
+        E_t_upper = torch.triu(i_e_pert, diagonal=1)
+        E_t = (E_t_upper + E_t_upper.transpose(1, 2))
+    
+        E_t = F.one_hot(E_t, num_classes=self.Edim_output)
 
-        t_float = t_int / self.T
-        s_float = s_int / self.T
-
-        # beta_t and alpha_s_bar are used for denoising/loss computation
-        beta_t = self.noise_schedule(t_normalized=t_float)                         # (bs, 1)
-        alpha_s_bar = self.noise_schedule.get_alpha_bar(t_normalized=s_float)      # (bs, 1)
-        alpha_t_bar = self.noise_schedule.get_alpha_bar(t_normalized=t_float)      # (bs, 1)
-
-        Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, self.device)  # (bs, dx_in, dx_out), (bs, de_in, de_out)
-        
-        bs, n, d = X.shape
-        X_all = torch.cat([X, E.reshape(bs, n, -1)], dim=-1)
-        prob_all = X_all @ Qtb.X
-        probX = prob_all[:, :, :self.Xdim_output]
-        probE = prob_all[:, :, self.Xdim_output:].reshape(bs, n, n, -1)
-
-        sampled_t = diffusion_utils.sample_discrete_features(probX=probX, probE=probE, node_mask=node_mask)
-
-        X_t = F.one_hot(sampled_t.X, num_classes=self.Xdim_output)
-        E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
         assert (X.shape == X_t.shape) and (E.shape == E_t.shape)
 
         y_t = y
         z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y_t).type_as(X_t).mask(node_mask)
 
-        noisy_data = {'t_int': t_int, 't': t_float, 'beta_t': beta_t, 'alpha_s_bar': alpha_s_bar,
-                      'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
+        noisy_data = {'t': t,  'sigma': sigma, 'dsigma': dsigma, 'index_x': i_x_pert, 'index_e': E_t.argmax(dim=-1), 
+        'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
         return noisy_data
 
     def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False):
@@ -472,36 +476,37 @@ class Graph_DiT(pl.LightningModule):
            node_mask : (bs, n)
            Output: nll (size 1)
        """
-        t = noisy_data['t']
+        # t = noisy_data['t']
 
-        # 1.
-        N = node_mask.sum(1).long()
-        log_pN = self.node_dist.log_prob(N)
+        # # 1.
+        # N = node_mask.sum(1).long()
+        # log_pN = self.node_dist.log_prob(N)
 
-        # 2. The KL between q(z_T | x) and p(z_T) = Uniform(1/num_classes). Should be close to zero.
-        kl_prior = self.kl_prior(X, E, node_mask)
+        # # 2. The KL between q(z_T | x) and p(z_T) = Uniform(1/num_classes). Should be close to zero.
+        # kl_prior = self.kl_prior(X, E, node_mask)
 
-        # 3. Diffusion loss
-        loss_all_t = self.compute_Lt(X, E, y, pred, noisy_data, node_mask, test)
+        # # 3. Diffusion loss
+        # loss_all_t = self.compute_Lt(X, E, y, pred, noisy_data, node_mask, test)
 
-        # 4. Reconstruction loss
-        # Compute L0 term : -log p (X, E, y | z_0) = reconstruction loss
-        prob0 = self.reconstruction_logp(t, X, E, y, node_mask)
+        # # 4. Reconstruction loss
+        # # Compute L0 term : -log p (X, E, y | z_0) = reconstruction loss
+        # prob0 = self.reconstruction_logp(t, X, E, y, node_mask)
 
-        eps = 1e-8
-        loss_term_0 = self.val_X_logp(X * (prob0.X+eps).log()) + self.val_E_logp(E * (prob0.E+eps).log())
+        # eps = 1e-8
+        # loss_term_0 = self.val_X_logp(X * (prob0.X+eps).log()) + self.val_E_logp(E * (prob0.E+eps).log())
 
-        # Combine terms
-        nlls = - log_pN + kl_prior + loss_all_t - loss_term_0
-        assert len(nlls.shape) == 1, f'{nlls.shape} has more than only batch dim.'
+        # # Combine terms
+        # nlls = - log_pN + kl_prior + loss_all_t - loss_term_0
+        # assert len(nlls.shape) == 1, f'{nlls.shape} has more than only batch dim.'
 
-        # Update NLL metric object and return batch nll
-        nll = (self.test_nll if test else self.val_nll)(nlls)        # Average over the batch
+        # # Update NLL metric object and return batch nll
+        # nll = (self.test_nll if test else self.val_nll)(nlls)        # Average over the batch
         
-        return nll
+        return 0.0
     
     @torch.no_grad()
-    def sample_batch(self, batch_id, batch_size, y, keep_chain, number_chain_steps, save_final, num_nodes=None):
+    def sample_batch(self, batch_id, batch_size, y, keep_chain, number_chain_steps, save_final, num_nodes=None
+     , eps=1e-5):
         """
         :param batch_id: int
         :param batch_size: int
@@ -521,22 +526,29 @@ class Graph_DiT(pl.LightningModule):
         n_max = self.max_n_nodes
         arange = torch.arange(n_max, device=self.device).unsqueeze(0).expand(batch_size, -1)
         node_mask = arange < n_nodes.unsqueeze(1)
-        
-        z_T = diffusion_utils.sample_discrete_feature_noise(limit_dist=self.limit_dist, node_mask=node_mask)
-        X, E = z_T.X, z_T.E
+     
+        X = self.graph.sample_limit((batch_size, n_max),  sample_type='node').to(self.device)   
+        X = F.one_hot(X, num_classes=self.Xdim)
+        E = self.graph.sample_limit((batch_size, n_max , n_max),  sample_type='edge').to(self.device)
+        E_t_upper = torch.triu(E, diagonal=1)
+        E_t = (E_t_upper + E_t_upper.transpose(1, 2))
+        E_t = F.one_hot(E_t, num_classes=self.Edim)
 
-        assert (E == torch.transpose(E, 1, 2)).all()
+        Z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+        X = Z_t.X
+        E = Z_t.E
 
-        # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        for s_int in reversed(range(0, self.T)):
-            s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
-            t_array = s_array + 1
-            s_norm = s_array / self.T
-            t_norm = t_array / self.T
-
+        timesteps = torch.linspace(1, eps, self.T + 1, device=self.device)
+        dt = (1 - eps) / self.T
+        for i in range(self.T):
+            t = timesteps[i] * torch.ones(X.shape[0], 1, device=self.device)
             # Sample z_s
-            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(s_norm, t_norm, X, E, y, node_mask)
+            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(t, dt, X, E, y, node_mask)
             X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+        
+        #follow the final denosing process of SEDD
+        t = timesteps[-1] * torch.ones(X.shape[0], 1, device=self.device)
+        sampled_s, discrete_sampled_s = self.sample_p_z0(t, dt, X, E, y, node_mask)
 
         # Sample
         sampled_s = sampled_s.mask(node_mask, collapse=True)
@@ -548,67 +560,118 @@ class Graph_DiT(pl.LightningModule):
             atom_types = X[i, :n].cpu()
             edge_types = E[i, :n, :n].cpu()
             molecule_list.append([atom_types, edge_types])
-        
+        print("sampling completed!")
         return molecule_list
 
-    def sample_p_zs_given_zt(self, s, t, X_t, E_t, y_t, node_mask):
+    def sample_p_zs_given_zt(self, t, dt, X_t, E_t, y_t, node_mask):
         """Samples from zs ~ p(zs | zt). Only used during sampling.
            if last_step, return the graph prediction as well"""
+           
         bs, n, dxs = X_t.shape
-        beta_t = self.noise_schedule(t_normalized=t)  # (bs, 1)
-        alpha_s_bar = self.noise_schedule.get_alpha_bar(t_normalized=s)
-        alpha_t_bar = self.noise_schedule.get_alpha_bar(t_normalized=t)
+        curr_sigma = self.noise(t)[0]
+        next_sigma = self.noise(t - dt)[0]
+        dsigma = curr_sigma - next_sigma
 
-        # Neural net predictions
-        noisy_data = {'X_t': X_t, 'E_t': E_t, 'y_t': y_t, 't': t, 'node_mask': node_mask}
-        
+        noisy_data = {'t': t,  'sigma': curr_sigma.squeeze(-1), 'dsigma': dsigma.squeeze(-1), 'X_t': X_t, 'E_t': E_t, 'y_t': y_t
+        ,'index_x': X_t.argmax(dim=-1) ,'index_e': E_t.argmax(dim=-1) ,'node_mask': node_mask}
+       
         def get_prob(noisy_data, unconditioned=False):
             pred = self.forward(noisy_data, unconditioned=unconditioned)
+            pred.X = pred.X.exp()
+            stag_score_x = self.graph.staggered_score(pred.X, dsigma)
+            probs_x = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
+      
+            pred.E = pred.E.exp()
+            stag_score_e = self.graph.staggered_score(pred.E, dsigma)
+            probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])
 
-            # Normalize predictions
-            pred_X = F.softmax(pred.X, dim=-1)               # bs, n, d0
-            pred_E = F.softmax(pred.E, dim=-1)               # bs, n, n, d0
+            # unnormalized_probs_x = probs_x
+            # unnormalized_probs_x[torch.sum(unnormalized_probs_x, dim=-1) == 0] = 1e-5  
+            # probs_x = unnormalized_probs_x / torch.sum(unnormalized_probs_x, dim=-1, keepdim=True)
 
-            # Retrieve transitions matrix
-            Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, self.device)
-            Qsb = self.transition_model.get_Qt_bar(alpha_s_bar, self.device)
-            Qt = self.transition_model.get_Qt(beta_t, self.device)
-
-            Xt_all = torch.cat([X_t, E_t.reshape(bs, n, -1)], dim=-1)
-            p_s_and_t_given_0 = diffusion_utils.compute_batched_over0_posterior_distribution(X_t=Xt_all,
-                                                                                            Qt=Qt.X,
-                                                                                            Qsb=Qsb.X,
-                                                                                            Qtb=Qtb.X)
-            predX_all = torch.cat([pred_X, pred_E.reshape(bs, n, -1)], dim=-1)
-            weightedX_all = predX_all.unsqueeze(-1) * p_s_and_t_given_0
-            unnormalized_probX_all = weightedX_all.sum(dim=2)                     # bs, n, d_t-1
-
-            unnormalized_prob_X = unnormalized_probX_all[:, :, :self.Xdim_output]
-            unnormalized_prob_E = unnormalized_probX_all[:, :, self.Xdim_output:].reshape(bs, n*n, -1)
-
-            unnormalized_prob_X[torch.sum(unnormalized_prob_X, dim=-1) == 0] = 1e-5
-            unnormalized_prob_E[torch.sum(unnormalized_prob_E, dim=-1) == 0] = 1e-5
-
-            prob_X = unnormalized_prob_X / torch.sum(unnormalized_prob_X, dim=-1, keepdim=True)  # bs, n, d_t-1
-            prob_E = unnormalized_prob_E / torch.sum(unnormalized_prob_E, dim=-1, keepdim=True)  # bs, n, d_t-1
-            prob_E = prob_E.reshape(bs, n, n, pred_E.shape[-1])
-
-            return prob_X, prob_E
+            # unnormalized_probs_e = probs_e.reshape(bs, n*n, -1)
+            # unnormalized_probs_e[torch.sum(unnormalized_probs_e, dim=-1) == 0] = 1e-5 
+            # probs_e = unnormalized_probs_e / torch.sum(unnormalized_probs_e, dim=-1, keepdim=True)
+            # probs_e = probs_e.reshape(bs, n, n, probs_e.shape[-1])
+            return probs_x, probs_e
 
         prob_X, prob_E = get_prob(noisy_data)
 
-        ### Guidance
-        if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            uncon_prob_X, uncon_prob_E = get_prob(noisy_data, unconditioned=True)
-            prob_X = uncon_prob_X *  (prob_X / uncon_prob_X.clamp_min(1e-10)) ** self.guide_scale  
-            prob_E = uncon_prob_E * (prob_E / uncon_prob_E.clamp_min(1e-10)) ** self.guide_scale  
-            prob_X = prob_X / prob_X.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-            prob_E = prob_E / prob_E.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+        # ### Guidance
+        # if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
+        #     uncon_prob_X, uncon_prob_E = get_prob(noisy_data, unconditioned=True)
+        #     #prob_X = uncon_prob_X *  (prob_X / uncon_prob_X.clamp_min(1e-10)) ** self.guide_scale
+        #     #prob_E = uncon_prob_E * (prob_E / uncon_prob_E.clamp_min(1e-10)) ** self.guide_scale    
+        #     log_X_guided = torch.log(uncon_prob_X.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_X.clamp_min(1e-10)) - torch.log(uncon_prob_X.clamp_min(1e-10)))
+        #     prob_X = torch.exp(log_X_guided)
+        #     log_E_guided = torch.log(uncon_prob_E.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_E.clamp_min(1e-10)) - torch.log(uncon_prob_E.clamp_min(1e-10)))
+        #     prob_E = torch.exp(log_E_guided)
+        #     # prob_X = prob_X / prob_X.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+        #     # prob_E = prob_E / prob_E.sum(dim=-1, keepdim=True).clamp_min(1e-10)
 
-        assert ((prob_X.sum(dim=-1) - 1).abs() < 1e-4).all()
-        assert ((prob_E.sum(dim=-1) - 1).abs() < 1e-4).all()
+        # assert ((prob_X.sum(dim=-1) - 1).abs() < 1e-4).all()
+        # assert ((prob_E.sum(dim=-1) - 1).abs() < 1e-4).all()
 
-        sampled_s = diffusion_utils.sample_discrete_features(prob_X, prob_E, node_mask=node_mask, step=s[0,0].item())
+        sampled_s = diffusion_utils.gumbel_sample_discrete_features(prob_X, prob_E)
+
+        X_s = F.one_hot(sampled_s.X, num_classes=self.Xdim_output).float()
+        E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output).float()
+
+        assert (E_s == torch.transpose(E_s, 1, 2)).all()
+        assert (X_t.shape == X_s.shape) and (E_t.shape == E_s.shape)
+
+        out_one_hot = utils.PlaceHolder(X=X_s, E=E_s, y=y_t)
+        out_discrete = utils.PlaceHolder(X=X_s, E=E_s, y=y_t)
+
+        return out_one_hot.mask(node_mask).type_as(y_t), out_discrete.mask(node_mask, collapse=True).type_as(y_t)
+
+
+    def sample_p_z0(self, t, dt, X_t, E_t, y_t, node_mask):
+    
+        bs, n, dxs = X_t.shape
+        sigma = self.noise(t)[0]
+ 
+        noisy_data = {'t': t,  'sigma': sigma.squeeze(-1), 'X_t': X_t, 'E_t': E_t, 'y_t': y_t
+        ,'index_x': X_t.argmax(dim=-1) ,'index_e': E_t.argmax(dim=-1) ,'node_mask': node_mask}
+       
+        def get_prob(noisy_data, unconditioned=False):
+            pred = self.forward(noisy_data, unconditioned=unconditioned)
+            pred.X = pred.X.exp()
+            stag_score_x = self.graph.staggered_score(pred.X, sigma)
+            probs_x = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], sigma[..., None])
+      
+            pred.E = pred.E.exp()
+            stag_score_e = self.graph.staggered_score(pred.E, sigma)
+            probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], sigma[..., None, None])
+
+            # unnormalized_probs_x = probs_x
+            # unnormalized_probs_x[torch.sum(unnormalized_probs_x, dim=-1) == 0] = 1e-5  
+            # probs_x = unnormalized_probs_x / torch.sum(unnormalized_probs_x, dim=-1, keepdim=True)
+
+            # unnormalized_probs_e = probs_e.reshape(bs, n*n, -1)
+            # unnormalized_probs_e[torch.sum(unnormalized_probs_e, dim=-1) == 0] = 1e-5 
+            # probs_e = unnormalized_probs_e / torch.sum(unnormalized_probs_e, dim=-1, keepdim=True)
+            # probs_e = probs_e.reshape(bs, n, n, probs_e.shape[-1])
+            return probs_x, probs_e
+
+        prob_X, prob_E = get_prob(noisy_data)
+
+        # ### Guidance
+        # if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
+        #     uncon_prob_X, uncon_prob_E = get_prob(noisy_data, unconditioned=True)
+        #     #prob_X = uncon_prob_X *  (prob_X / uncon_prob_X.clamp_min(1e-10)) ** self.guide_scale
+        #     #prob_E = uncon_prob_E * (prob_E / uncon_prob_E.clamp_min(1e-10)) ** self.guide_scale    
+        #     log_X_guided = torch.log(uncon_prob_X.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_X.clamp_min(1e-10)) - torch.log(uncon_prob_X.clamp_min(1e-10)))
+        #     prob_X = torch.exp(log_X_guided)
+        #     log_E_guided = torch.log(uncon_prob_E.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_E.clamp_min(1e-10)) - torch.log(uncon_prob_E.clamp_min(1e-10)))
+        #     prob_E = torch.exp(log_E_guided)
+        #     # prob_X = prob_X / prob_X.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+        #     # prob_E = prob_E / prob_E.sum(dim=-1, keepdim=True).clamp_min(1e-10)
+
+        # assert ((prob_X.sum(dim=-1) - 1).abs() < 1e-4).all()
+        # assert ((prob_E.sum(dim=-1) - 1).abs() < 1e-4).all()
+
+        sampled_s = diffusion_utils.gumbel_sample_discrete_features(prob_X, prob_E)
 
         X_s = F.one_hot(sampled_s.X, num_classes=self.Xdim_output).float()
         E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output).float()

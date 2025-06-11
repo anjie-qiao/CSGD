@@ -16,6 +16,9 @@ from metrics.molecular_metrics_sampling import SamplingMolecularMetrics
 
 from analysis.visualization import MolecularVisualization
 
+os.environ['HYDRA_FULL_ERROR'] = '1'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
 warnings.filterwarnings("ignore", category=UserWarning)
 torch.set_float32_matmul_precision("medium")
