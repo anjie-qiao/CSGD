@@ -14,6 +14,7 @@ import utils
 
 import diffusion.graph_lib as graph_lib
 import diffusion.noise_lib as noise_lib
+from torch.optim.lr_scheduler import LambdaLR
 
 class Graph_DiT(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools):
@@ -31,12 +32,17 @@ class Graph_DiT(pl.LightningModule):
         self.name = cfg.general.name
         self.T = cfg.model.diffusion_steps
         self.guide_scale = cfg.model.guide_scale
+        self.graph_type = cfg.graph.type
 
         self.Xdim = input_dims['X']
         self.Edim = input_dims['E']
         self.ydim = input_dims['y']
-        self.Xdim_output = output_dims['X']
-        self.Edim_output = output_dims['E']
+        if self.graph_type == "absorb":
+            self.Xdim_output = output_dims['X'] + 1
+            self.Edim_output = output_dims['E'] + 1
+        else:
+            self.Xdim_output = output_dims['X']
+            self.Edim_output = output_dims['E']
         self.ydim_output = output_dims['y']
         self.node_dist = nodes_dist
         self.active_index = active_index
@@ -64,16 +70,29 @@ class Graph_DiT(pl.LightningModule):
         self.visualization_tools = visualization_tools
         self.max_n_nodes = dataset_infos.max_n_nodes
 
-        self.model = Denoiser(max_n_nodes=self.max_n_nodes,
-                        hidden_size=cfg.model.hidden_size,
-                        depth=cfg.model.depth,
-                        num_heads=cfg.model.num_heads,
-                        mlp_ratio=cfg.model.mlp_ratio,
-                        drop_condition=cfg.model.drop_condition,
-                        Xdim=self.Xdim, 
-                        Edim=self.Edim,
-                        ydim=self.ydim,
-                        task_type=dataset_infos.task_type)
+        if self.graph_type == "absorb":
+            self.model = Denoiser(max_n_nodes=self.max_n_nodes,
+                            hidden_size=cfg.model.hidden_size,
+                            depth=cfg.model.depth,
+                            num_heads=cfg.model.num_heads,
+                            mlp_ratio=cfg.model.mlp_ratio,
+                            drop_condition=cfg.model.drop_condition,
+                            Xdim=self.Xdim + 1, 
+                            Edim=self.Edim + 1,
+                            ydim=self.ydim,
+                            task_type=dataset_infos.task_type,
+                            graph_type=self.graph_type,)
+        else:
+            self.model = Denoiser(max_n_nodes=self.max_n_nodes,
+                            hidden_size=cfg.model.hidden_size,
+                            depth=cfg.model.depth,
+                            num_heads=cfg.model.num_heads,
+                            mlp_ratio=cfg.model.mlp_ratio,
+                            drop_condition=cfg.model.drop_condition,
+                            Xdim=self.Xdim, 
+                            Edim=self.Edim,
+                            ydim=self.ydim,
+                            task_type=dataset_infos.task_type)
 
         self.noise = noise_lib.get_noise(cfg)
 
@@ -111,7 +130,13 @@ class Graph_DiT(pl.LightningModule):
         self.batch_size = self.cfg.train.batch_size
 
         self.sampling_eps = cfg.noise.sampling_eps
+        cfg.graph.x_dim = output_dims['X']
+        cfg.graph.e_dim = output_dims['E']
         self.graph = graph_lib.get_graph(cfg)
+        self.warmup_epochs = cfg.train.warmup_epochs
+        self.beta1 = cfg.train.beta1
+        self.beta2 = cfg.train.beta2
+        self.train_eps = cfg.train.eps
    
 
     def forward(self, noisy_data, unconditioned=False):
@@ -150,7 +175,18 @@ class Graph_DiT(pl.LightningModule):
         params = self.parameters()
         optimizer = torch.optim.AdamW(params, lr=self.cfg.train.lr, amsgrad=True,
                                  weight_decay=self.cfg.train.weight_decay)
-        return optimizer
+
+        def lr_lambda(current_epoch: int):
+            factor = float(current_epoch) / float(max(1, self.warmup_epochs))
+            return min(1.0, factor)
+
+        scheduler = {
+            'scheduler': LambdaLR(optimizer, lr_lambda),
+            'interval': 'epoch',  
+            'frequency': 1,
+            'name': 'learning_rate'
+        }
+        return [optimizer], [scheduler]
     
     def on_fit_start(self) -> None:
         self.train_iterations = self.trainer.datamodule.training_iterations
@@ -459,7 +495,7 @@ class Graph_DiT(pl.LightningModule):
     
         E_t = F.one_hot(E_t, num_classes=self.Edim_output)
 
-        assert (X.shape == X_t.shape) and (E.shape == E_t.shape)
+        #assert (X.shape == X_t.shape) and (E.shape == E_t.shape)
 
         y_t = y
         z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y_t).type_as(X_t).mask(node_mask)
@@ -528,11 +564,11 @@ class Graph_DiT(pl.LightningModule):
         node_mask = arange < n_nodes.unsqueeze(1)
      
         X = self.graph.sample_limit((batch_size, n_max),  sample_type='node').to(self.device)   
-        X = F.one_hot(X, num_classes=self.Xdim)
+        X = F.one_hot(X, num_classes=self.Xdim_output)
         E = self.graph.sample_limit((batch_size, n_max , n_max),  sample_type='edge').to(self.device)
         E_t_upper = torch.triu(E, diagonal=1)
         E_t = (E_t_upper + E_t_upper.transpose(1, 2))
-        E_t = F.one_hot(E_t, num_classes=self.Edim)
+        E_t = F.one_hot(E_t, num_classes=self.Edim_output)
 
         Z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
         X = Z_t.X
@@ -655,7 +691,9 @@ class Graph_DiT(pl.LightningModule):
             return probs_x, probs_e
 
         prob_X, prob_E = get_prob(noisy_data)
-
+        if self.graph_type == "absorb":
+            prob_X = prob_X[..., :-1]
+            prob_E = prob_E[..., :-1]
         # ### Guidance
         # if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
         #     uncon_prob_X, uncon_prob_E = get_prob(noisy_data, unconditioned=True)

@@ -22,6 +22,7 @@ class Denoiser(nn.Module):
         Edim=5,
         ydim=3,
         task_type='regression',
+        graph_type = "uniform",
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -30,6 +31,7 @@ class Denoiser(nn.Module):
 
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedding_list = torch.nn.ModuleList()
+        self.graph_type = graph_type
 
         self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition))
         for i in range(ydim - 2):
@@ -103,10 +105,11 @@ class Denoiser(nn.Module):
         X, E, y = self.out_layer(x, x_in, e_in, c, t, node_mask)
 
         #following the final output process of SEDD 
-        # Not yet configured for Uniform
-        # esigm1_log = torch.where(t < 0.5, torch.expm1(t), t.exp() - 1).log().to(X.dtype)[:, None, None]
-        # X = X - esigm1_log - np.log(X.shape[-1] - 1)# this will be approximately averaged at 0
-        # E = E - esigm1_log[:, :, None] - np.log(E.shape[-1] - 1)
+        if self.graph_type == "absorb":
+            # Not yet configured for Uniform
+            esigm1_log = torch.where(t < 0.5, torch.expm1(t), t.exp() - 1).log().to(X.dtype)[:, None, None]
+            X = X - esigm1_log - np.log(X.shape[-1] - 1)# this will be approximately averaged at 0
+            E = E - esigm1_log[:, :, None] - np.log(E.shape[-1] - 1)
         X = torch.scatter(X, -1, index_x.unsqueeze(-1), torch.zeros_like(X[..., :1]))
         E = torch.scatter(E, -1, index_e.unsqueeze(-1), torch.zeros_like(E[..., :1]))
 

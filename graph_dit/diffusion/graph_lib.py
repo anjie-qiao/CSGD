@@ -259,8 +259,12 @@ class Absorbing(Graph):
     
     def staggered_score(self, score, dsigma):
         score = score.clone() # yeah yeah whatever we should probably do this
-        extra_const = (1 - (dsigma).exp()) * score.sum(dim=-1)
-        score *= dsigma.exp()[:, None]
+        if score.ndim == 3:
+            extra_const = (1 - (dsigma).exp()) * score.sum(dim=-1)
+            score *= dsigma.exp()[:, None]
+        elif score.ndim == 4:
+            extra_const = (1 - (dsigma).exp()[..., None]) * score.sum(dim=-1)
+            score *= dsigma.exp()[:, None, None]
         score[..., -1] += extra_const
         return score
 
