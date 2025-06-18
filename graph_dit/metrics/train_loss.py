@@ -103,6 +103,7 @@ class TrainLossScore(nn.Module):
         self.node_loss = MeanMetric()
         self.edge_loss = MeanMetric()
         self.y_loss = MeanSquaredError()
+        self.weight_loss = AtomWeightMetric()
         self.lambda_train = lambda_train
 
     def forward(self, masked_pred_X, masked_pred_E, pred_y, true_X, true_E, true_y, node_mask, noisy_data, sigma, graph, log: bool):
@@ -114,6 +115,8 @@ class TrainLossScore(nn.Module):
         true_E : tensor -- (bs, n, n, de)
         true_y : tensor -- (bs, )
         log : boolean. """
+
+        loss_weight = self.weight_loss(masked_pred_X, true_X)
 
         true_X_labels = true_X.argmax(dim=-1)    # (bs, n)
         pred_X_logits = masked_pred_X            # (bs, n, dx)
@@ -137,7 +140,7 @@ class TrainLossScore(nn.Module):
         #loss_E = (noisy_data['dsigma'][:, None, None] * loss_E).sum(dim=(1,2)).mean()
         self.node_loss.update(loss_X)
         self.edge_loss.update(loss_E)
-        return self.lambda_train[0] * loss_X + self.lambda_train[1] * loss_E 
+        return self.lambda_train[0] * loss_X + self.lambda_train[1] * loss_E  + self.lambda_train[2] *loss_weight
 
     def reset(self):
         for metric in [self.node_loss, self.edge_loss, self.y_loss]:

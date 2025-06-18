@@ -15,6 +15,7 @@ import utils
 import diffusion.graph_lib as graph_lib
 import diffusion.noise_lib as noise_lib
 from torch.optim.lr_scheduler import LambdaLR
+import math
 
 class Graph_DiT(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools):
@@ -70,29 +71,17 @@ class Graph_DiT(pl.LightningModule):
         self.visualization_tools = visualization_tools
         self.max_n_nodes = dataset_infos.max_n_nodes
 
-        if self.graph_type == "absorb":
-            self.model = Denoiser(max_n_nodes=self.max_n_nodes,
-                            hidden_size=cfg.model.hidden_size,
-                            depth=cfg.model.depth,
-                            num_heads=cfg.model.num_heads,
-                            mlp_ratio=cfg.model.mlp_ratio,
-                            drop_condition=cfg.model.drop_condition,
-                            Xdim=self.Xdim + 1, 
-                            Edim=self.Edim + 1,
-                            ydim=self.ydim,
-                            task_type=dataset_infos.task_type,
-                            graph_type=self.graph_type,)
-        else:
-            self.model = Denoiser(max_n_nodes=self.max_n_nodes,
-                            hidden_size=cfg.model.hidden_size,
-                            depth=cfg.model.depth,
-                            num_heads=cfg.model.num_heads,
-                            mlp_ratio=cfg.model.mlp_ratio,
-                            drop_condition=cfg.model.drop_condition,
-                            Xdim=self.Xdim, 
-                            Edim=self.Edim,
-                            ydim=self.ydim,
-                            task_type=dataset_infos.task_type)
+        self.model = Denoiser(max_n_nodes=self.max_n_nodes,
+                        hidden_size=cfg.model.hidden_size,
+                        depth=cfg.model.depth,
+                        num_heads=cfg.model.num_heads,
+                        mlp_ratio=cfg.model.mlp_ratio,
+                        drop_condition=cfg.model.drop_condition,
+                        Xdim=(self.Xdim + 1 if self.graph_type == "absorb" else self.Xdim),
+                        Edim=(self.Edim + 1 if self.graph_type == "absorb" else self.Edim),
+                        ydim=self.ydim,
+                        task_type=dataset_infos.task_type,
+                        graph_type=self.graph_type,)
 
         self.noise = noise_lib.get_noise(cfg)
 
@@ -137,7 +126,9 @@ class Graph_DiT(pl.LightningModule):
         self.beta1 = cfg.train.beta1
         self.beta2 = cfg.train.beta2
         self.train_eps = cfg.train.eps
-   
+        self.n_epochs = cfg.train.n_epochs
+        self.min_lr_factor = cfg.train.min_lr_factor
+        self.start_decay  = int(self.n_epochs * 0.6)
 
     def forward(self, noisy_data, unconditioned=False):
         x, e, y = noisy_data['X_t'].float(), noisy_data['E_t'].float(), noisy_data['y_t'].float().clone()
@@ -177,8 +168,14 @@ class Graph_DiT(pl.LightningModule):
                                  weight_decay=self.cfg.train.weight_decay)
 
         def lr_lambda(current_epoch: int):
-            factor = float(current_epoch) / float(max(1, self.warmup_epochs))
-            return min(1.0, factor)
+            if current_epoch < self.warmup_epochs:
+                return float(current_epoch) / float(max(1, self.warmup_epochs))
+            if current_epoch < self.start_decay:
+                return 1.0
+            
+            progress = float(current_epoch - self.start_decay) / float(max(1, (self.n_epochs - self.start_decay)))
+            # cosine decay
+            return  self.min_lr_factor + (1 - self.min_lr_factor) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
         scheduler = {
             'scheduler': LambdaLR(optimizer, lr_lambda),
@@ -495,8 +492,6 @@ class Graph_DiT(pl.LightningModule):
     
         E_t = F.one_hot(E_t, num_classes=self.Edim_output)
 
-        #assert (X.shape == X_t.shape) and (E.shape == E_t.shape)
-
         y_t = y
         z_t = utils.PlaceHolder(X=X_t, E=E_t, y=y_t).type_as(X_t).mask(node_mask)
 
@@ -680,14 +675,6 @@ class Graph_DiT(pl.LightningModule):
             stag_score_e = self.graph.staggered_score(pred.E, sigma)
             probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], sigma[..., None, None])
 
-            # unnormalized_probs_x = probs_x
-            # unnormalized_probs_x[torch.sum(unnormalized_probs_x, dim=-1) == 0] = 1e-5  
-            # probs_x = unnormalized_probs_x / torch.sum(unnormalized_probs_x, dim=-1, keepdim=True)
-
-            # unnormalized_probs_e = probs_e.reshape(bs, n*n, -1)
-            # unnormalized_probs_e[torch.sum(unnormalized_probs_e, dim=-1) == 0] = 1e-5 
-            # probs_e = unnormalized_probs_e / torch.sum(unnormalized_probs_e, dim=-1, keepdim=True)
-            # probs_e = probs_e.reshape(bs, n, n, probs_e.shape[-1])
             return probs_x, probs_e
 
         prob_X, prob_E = get_prob(noisy_data)
