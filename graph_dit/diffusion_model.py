@@ -16,6 +16,7 @@ import diffusion.graph_lib as graph_lib
 import diffusion.noise_lib as noise_lib
 from torch.optim.lr_scheduler import LambdaLR
 import math
+import random
 
 class Graph_DiT(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools):
@@ -130,12 +131,12 @@ class Graph_DiT(pl.LightningModule):
         self.min_lr_factor = cfg.train.min_lr_factor
         self.start_decay  = int(self.n_epochs * 0.6)
 
-    def forward(self, noisy_data, unconditioned=False):
+    def forward(self, noisy_data, unconditioned=False, condition_index=0):
         x, e, y = noisy_data['X_t'].float(), noisy_data['E_t'].float(), noisy_data['y_t'].float().clone()
         node_mask, t, sigma =  noisy_data['node_mask'], noisy_data['t'], noisy_data['sigma']
         index_x, index_e = noisy_data['index_x'], noisy_data['index_e']
         # in contionous-time diffusion, sigma replaces the timestep t as the condition
-        pred = self.model(x, e, node_mask, y=y, t=sigma, index_x=index_x, index_e=index_e, unconditioned=unconditioned)
+        pred = self.model(x, e, node_mask, y=y, t=sigma, index_x=index_x, index_e=index_e, unconditioned=unconditioned, condition_index=condition_index)
         return pred
         
     def training_step(self, data, i):
@@ -148,7 +149,13 @@ class Graph_DiT(pl.LightningModule):
         X, E = dense_data.X, dense_data.E
         #data.y = [SA + SC + target properties (such as O2-N2-CO2)]
         noisy_data = self.apply_noise(X, E, data.y, node_mask)
-        pred = self.forward(noisy_data)
+
+        # randomly select single condition
+        # polymers (SA/SC, O2, N2, CO2)  ydim = 5 
+        # BACE/BBBP/HIV (SA/SC， Class)  ydim = 3
+        selected_cond_idx = random.randint(0, self.ydim - 2)  
+
+        pred = self.forward(noisy_data, condition_index=selected_cond_idx)
         loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
                             true_X=X, true_E=E, true_y=data.y, node_mask=node_mask, 
                             noisy_data=noisy_data,
@@ -255,7 +262,7 @@ class Graph_DiT(pl.LightningModule):
             num_examples = self.val_y_collection.size(0)
             start_index = 0
             while samples_left_to_generate > 0:                
-                bs = 1 * self.cfg.train.batch_size
+                bs = int(1 * self.cfg.train.batch_size)
                 to_generate = min(samples_left_to_generate, bs)
                 to_save = min(samples_left_to_save, bs)
                 chains_save = min(chains_left_to_save, bs)
@@ -334,8 +341,7 @@ class Graph_DiT(pl.LightningModule):
         while samples_left_to_generate > 0:
             print(f'samples left to generate: {samples_left_to_generate}/'
                 f'{self.cfg.general.final_model_samples_to_generate}', end='', flush=True)
-            bs = 1 * self.cfg.train.batch_size
-            #bs = int(1 * (self.cfg.train.batch_size/2))
+            bs = int(0.5 * self.cfg.train.batch_size)
             to_generate = min(samples_left_to_generate, bs)
             to_save = min(samples_left_to_save, bs)
             chains_save = min(chains_left_to_save, bs)
@@ -606,42 +612,38 @@ class Graph_DiT(pl.LightningModule):
         noisy_data = {'t': t,  'sigma': curr_sigma.squeeze(-1), 'dsigma': dsigma.squeeze(-1), 'X_t': X_t, 'E_t': E_t, 'y_t': y_t
         ,'index_x': X_t.argmax(dim=-1) ,'index_e': E_t.argmax(dim=-1) ,'node_mask': node_mask}
        
-        def get_prob(noisy_data, unconditioned=False):
-            pred = self.forward(noisy_data, unconditioned=unconditioned)
-            pred.X = pred.X.exp()
-            stag_score_x = self.graph.staggered_score(pred.X, dsigma)
-            probs_x = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
+        # def get_prob(noisy_data, unconditioned=False):
+        #     pred = self.forward(noisy_data, unconditioned=unconditioned)
+        #     pred.X = pred.X.exp()
+        #     stag_score_x = self.graph.staggered_score(pred.X, dsigma)
+        #     probs_x = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
       
-            pred.E = pred.E.exp()
-            stag_score_e = self.graph.staggered_score(pred.E, dsigma)
-            probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])
+        #     pred.E = pred.E.exp()
+        #     stag_score_e = self.graph.staggered_score(pred.E, dsigma)
+        #     probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])
+        #     return probs_x, probs_e
+        def get_prob(noisy_data, unconditioned=False, condition_index=0):
+            pred = self.forward(noisy_data, unconditioned=unconditioned, condition_index=condition_index)
+            return pred.X, pred.E
 
-            # unnormalized_probs_x = probs_x
-            # unnormalized_probs_x[torch.sum(unnormalized_probs_x, dim=-1) == 0] = 1e-5  
-            # probs_x = unnormalized_probs_x / torch.sum(unnormalized_probs_x, dim=-1, keepdim=True)
+        ### Guidance
+        if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
+            uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True)
+            guided_logscore_X = uncon_logscore_X.clone()
+            guided_logscore_E = uncon_logscore_E.clone()
+            avg_guide_scale =  self.guide_scale / (self.ydim-1)
+            for i in range(self.ydim-1):
+                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, condition_index=i)
+                guided_logscore_X += avg_guide_scale * (logscore_X_cond - uncon_logscore_X)
+                guided_logscore_E += avg_guide_scale * (logscore_E_cond - uncon_logscore_E)
 
-            # unnormalized_probs_e = probs_e.reshape(bs, n*n, -1)
-            # unnormalized_probs_e[torch.sum(unnormalized_probs_e, dim=-1) == 0] = 1e-5 
-            # probs_e = unnormalized_probs_e / torch.sum(unnormalized_probs_e, dim=-1, keepdim=True)
-            # probs_e = probs_e.reshape(bs, n, n, probs_e.shape[-1])
-            return probs_x, probs_e
-
-        prob_X, prob_E = get_prob(noisy_data)
-
-        # ### Guidance
-        # if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-        #     uncon_prob_X, uncon_prob_E = get_prob(noisy_data, unconditioned=True)
-        #     #prob_X = uncon_prob_X *  (prob_X / uncon_prob_X.clamp_min(1e-10)) ** self.guide_scale
-        #     #prob_E = uncon_prob_E * (prob_E / uncon_prob_E.clamp_min(1e-10)) ** self.guide_scale    
-        #     log_X_guided = torch.log(uncon_prob_X.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_X.clamp_min(1e-10)) - torch.log(uncon_prob_X.clamp_min(1e-10)))
-        #     prob_X = torch.exp(log_X_guided)
-        #     log_E_guided = torch.log(uncon_prob_E.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_E.clamp_min(1e-10)) - torch.log(uncon_prob_E.clamp_min(1e-10)))
-        #     prob_E = torch.exp(log_E_guided)
-        #     # prob_X = prob_X / prob_X.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-        #     # prob_E = prob_E / prob_E.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-
-        # assert ((prob_X.sum(dim=-1) - 1).abs() < 1e-4).all()
-        # assert ((prob_E.sum(dim=-1) - 1).abs() < 1e-4).all()
+            guide_X = guided_logscore_X.exp()
+            stag_score_x = self.graph.staggered_score(guide_X, dsigma)
+            prob_X = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
+      
+            guide_E= guided_logscore_E.exp()
+            stag_score_e = self.graph.staggered_score(guide_E, dsigma)
+            prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])      
 
         sampled_s = diffusion_utils.gumbel_sample_discrete_features(prob_X, prob_E)
 
@@ -665,36 +667,33 @@ class Graph_DiT(pl.LightningModule):
         noisy_data = {'t': t,  'sigma': sigma.squeeze(-1), 'X_t': X_t, 'E_t': E_t, 'y_t': y_t
         ,'index_x': X_t.argmax(dim=-1) ,'index_e': E_t.argmax(dim=-1) ,'node_mask': node_mask}
        
-        def get_prob(noisy_data, unconditioned=False):
-            pred = self.forward(noisy_data, unconditioned=unconditioned)
-            pred.X = pred.X.exp()
-            stag_score_x = self.graph.staggered_score(pred.X, sigma)
-            probs_x = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], sigma[..., None])
+
+        def get_prob(noisy_data, unconditioned=False, condition_index=0):
+            pred = self.forward(noisy_data, unconditioned=unconditioned, condition_index=condition_index)
+            return pred.X, pred.E
+
+        ### Guidance
+        if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
+            uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True)
+            guided_logscore_X = uncon_logscore_X.clone()
+            guided_logscore_E = uncon_logscore_E.clone()
+            avg_guide_scale =  self.guide_scale / (self.ydim-1)
+            for i in range(self.ydim-1):
+                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, condition_index=i)
+                guided_logscore_X += avg_guide_scale * (logscore_X_cond - uncon_logscore_X)
+                guided_logscore_E += avg_guide_scale * (logscore_E_cond - uncon_logscore_E)
+
+            guide_X = guided_logscore_X.exp()
+            stag_score_x = self.graph.staggered_score(guide_X, sigma)
+            prob_X = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], sigma[..., None])
       
-            pred.E = pred.E.exp()
-            stag_score_e = self.graph.staggered_score(pred.E, sigma)
-            probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], sigma[..., None, None])
+            guide_E= guided_logscore_E.exp()
+            stag_score_e = self.graph.staggered_score(guide_E, sigma)
+            prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], sigma[..., None, None])      
 
-            return probs_x, probs_e
-
-        prob_X, prob_E = get_prob(noisy_data)
         if self.graph_type == "absorb":
             prob_X = prob_X[..., :-1]
             prob_E = prob_E[..., :-1]
-        # ### Guidance
-        # if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-        #     uncon_prob_X, uncon_prob_E = get_prob(noisy_data, unconditioned=True)
-        #     #prob_X = uncon_prob_X *  (prob_X / uncon_prob_X.clamp_min(1e-10)) ** self.guide_scale
-        #     #prob_E = uncon_prob_E * (prob_E / uncon_prob_E.clamp_min(1e-10)) ** self.guide_scale    
-        #     log_X_guided = torch.log(uncon_prob_X.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_X.clamp_min(1e-10)) - torch.log(uncon_prob_X.clamp_min(1e-10)))
-        #     prob_X = torch.exp(log_X_guided)
-        #     log_E_guided = torch.log(uncon_prob_E.clamp_min(1e-10)) + self.guide_scale * (torch.log(prob_E.clamp_min(1e-10)) - torch.log(uncon_prob_E.clamp_min(1e-10)))
-        #     prob_E = torch.exp(log_E_guided)
-        #     # prob_X = prob_X / prob_X.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-        #     # prob_E = prob_E / prob_E.sum(dim=-1, keepdim=True).clamp_min(1e-10)
-
-        # assert ((prob_X.sum(dim=-1) - 1).abs() < 1e-4).all()
-        # assert ((prob_E.sum(dim=-1) - 1).abs() < 1e-4).all()
 
         sampled_s = diffusion_utils.gumbel_sample_discrete_features(prob_X, prob_E)
 

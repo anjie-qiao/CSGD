@@ -78,7 +78,7 @@ class Denoiser(nn.Module):
             _constant_init(block.adaLN_modulation[0], 0)
         _constant_init(self.out_layer.adaLN_modulation[0], 0)
 
-    def forward(self, x, e, node_mask, y, t, index_x, index_e, unconditioned):
+    def forward(self, x, e, node_mask, y, t, index_x, index_e, unconditioned, condition_index):
         
         force_drop_id = torch.zeros_like(y.sum(-1))
         force_drop_id[torch.isnan(y.sum(-1))] = 1
@@ -91,11 +91,13 @@ class Denoiser(nn.Module):
         x = self.x_embedder(x)
 
         c1 = self.t_embedder(t)
-        for i in range(1, self.ydim):
-            if i == 1:
-                c2 = self.y_embedding_list[i-1](y[:, :2], self.training, force_drop_id, t)
-            else:
-                c2 = c2 + self.y_embedding_list[i-1](y[:, i:i+1], self.training, force_drop_id, t)
+
+        if condition_index == 0:
+            c2 = self.y_embedding_list[0](y[:, :2], self.training, force_drop_id, t)
+        else:
+            start_index = condition_index + 1
+            c2 = self.y_embedding_list[condition_index](y[:, start_index:start_index+1], self.training, force_drop_id, t)
+        
         c = c1 + c2
         
         for i, block in enumerate(self.encoders):
