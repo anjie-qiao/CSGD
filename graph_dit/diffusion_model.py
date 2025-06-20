@@ -645,11 +645,11 @@ class Graph_DiT(pl.LightningModule):
             guide_X  = base_logscore_X + guided_logscore_X
             guide_E = base_logscore_E + guided_logscore_E
 
-            guide_X = guided_logscore_X.exp()
+            guide_X = guide_X.exp()
             stag_score_x = self.graph.staggered_score(guide_X, dsigma)
             prob_X = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
       
-            guide_E= guided_logscore_E.exp()
+            guide_E= guide_E.exp()
             stag_score_e = self.graph.staggered_score(guide_E, dsigma)
             prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])      
 
@@ -699,11 +699,11 @@ class Graph_DiT(pl.LightningModule):
             guide_X  = base_logscore_X + guided_logscore_X
             guide_E = base_logscore_E + guided_logscore_E
 
-            guide_X = guided_logscore_X.exp()
+            guide_X = guide_X.exp()
             stag_score_x = self.graph.staggered_score(guide_X, sigma)
             prob_X = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], sigma[..., None])
       
-            guide_E= guided_logscore_E.exp()
+            guide_E= guide_E.exp()
             stag_score_e = self.graph.staggered_score(guide_E, sigma)
             prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], sigma[..., None, None])      
 
