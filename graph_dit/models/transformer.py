@@ -170,17 +170,6 @@ class OutLayer(nn.Module):
             nn.Linear(hidden_size, 2 * final_size, bias=True)
         )
 
-        #follow SEDD
-        self.x_norm_final = nn.LayerNorm(self.atom_type)  
-        self.x_linear = nn.Linear(self.atom_type, self.atom_type)
-        self.x_linear.weight.data.zero_()
-        self.x_linear.bias.data.zero_()
-
-        self.e_norm_final = nn.LayerNorm(self.bond_type)
-        self.e_linear = nn.Linear(self.bond_type, self.bond_type)
-        self.e_linear.weight.data.zero_()
-        self.e_linear.bias.data.zero_()
-
 
     def forward(self, x, x_in, e_in, c, t, node_mask):
         x_all = self.xedecoder(x)
@@ -190,11 +179,9 @@ class OutLayer(nn.Module):
         
         atom_out = x_all[:, :, :self.atom_type]
         atom_out = x_in + atom_out
-        atom_out = self.x_linear(self.x_norm_final(atom_out))
 
         bond_out = x_all[:, :, self.atom_type:].reshape(B, N, N, self.bond_type)
         bond_out = e_in + bond_out
-        bond_out = self.e_linear(self.e_norm_final(bond_out))
 
         ##### standardize adj_out
         edge_mask = (~node_mask)[:, :, None] & (~node_mask)[:, None, :]
