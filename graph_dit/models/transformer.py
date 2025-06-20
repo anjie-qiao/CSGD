@@ -4,6 +4,7 @@ import torch.nn as nn
 import utils
 from models.layers import Attention, Mlp
 from models.conditions import TimestepEmbedder, CategoricalEmbedder, ClusterContinuousEmbedder
+import numpy as np
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -21,6 +22,7 @@ class Denoiser(nn.Module):
         Edim=5,
         ydim=3,
         task_type='regression',
+        graph_type = "uniform",
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -29,6 +31,7 @@ class Denoiser(nn.Module):
 
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedding_list = torch.nn.ModuleList()
+        self.graph_type = graph_type
 
         self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition))
         for i in range(ydim - 2):
@@ -75,7 +78,7 @@ class Denoiser(nn.Module):
             _constant_init(block.adaLN_modulation[0], 0)
         _constant_init(self.out_layer.adaLN_modulation[0], 0)
 
-    def forward(self, x, e, node_mask, y, t, unconditioned):
+    def forward(self, x, e, node_mask, y, t, index_x, index_e, unconditioned):
         
         force_drop_id = torch.zeros_like(y.sum(-1))
         force_drop_id[torch.isnan(y.sum(-1))] = 1
@@ -100,6 +103,16 @@ class Denoiser(nn.Module):
 
         # X: B * N * dx, E: B * N * N * de
         X, E, y = self.out_layer(x, x_in, e_in, c, t, node_mask)
+
+        #following the final output process of SEDD 
+        if self.graph_type == "absorb":
+            # Not yet configured for Uniform
+            esigm1_log = torch.where(t < 0.5, torch.expm1(t), t.exp() - 1).log().to(X.dtype)[:, None, None]
+            X = X - esigm1_log - np.log(X.shape[-1] - 1)# this will be approximately averaged at 0
+            E = E - esigm1_log[:, :, None] - np.log(E.shape[-1] - 1)
+        X = torch.scatter(X, -1, index_x.unsqueeze(-1), torch.zeros_like(X[..., :1]))
+        E = torch.scatter(E, -1, index_e.unsqueeze(-1), torch.zeros_like(E[..., :1]))
+
         return utils.PlaceHolder(X=X, E=E, y=y).mask(node_mask)
 
 
@@ -156,6 +169,7 @@ class OutLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * final_size, bias=True)
         )
+
 
     def forward(self, x, x_in, e_in, c, t, node_mask):
         x_all = self.xedecoder(x)

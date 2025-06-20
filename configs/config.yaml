@@ -1,7 +1,7 @@
 general:
     name: 'graph_dit'
     wandb: 'disabled' 
-    gpus: 4
+    gpus: 1
     resume: null
     test_only: null
     sample_every_val: 2500
@@ -19,28 +19,44 @@ model:
     type: 'discrete'
     transition: 'marginal'                  
     model: 'graph_dit'
-    diffusion_steps: 500
+    diffusion_steps: 1000
     diffusion_noise_schedule: 'cosine'
     guide_scale: 2
     hidden_size: 1152
-    depth: 6
+    depth: 8
     num_heads: 16
     mlp_ratio: 4
     drop_condition: 0.01
-    lambda_train: [1, 10]  # node and edge training weight 
+    lambda_train: [1, 10, 2]  # node, edge and atom weight training weight 
     ensure_connected: True
 train:
-    n_epochs: 10000
+    n_epochs: 30000
     batch_size: 1200
-    lr: 0.0002
-    clip_grad: null
+    lr: 0.0003
+    clip_grad: 1.
     num_workers: 0
     weight_decay: 0
     seed: 0
     val_check_interval: null
     check_val_every_n_epoch: 1
+    warmup_epochs: 1500
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    min_lr_factor: 0.3
 dataset:
     datadir: 'data/'
     task_name: null
     guidance_target: null
     pin_memory: False
+
+noise:
+  type: loglinear
+  sigma_min: 1e-4
+  sigma_max: 20
+  sampling_eps: 1e-5
+
+graph:
+  type: absorb   #uniform or absorb
+  x_dim: 
+  e_dim:

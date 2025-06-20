@@ -2,7 +2,8 @@ import time
 import torch
 import torch.nn as nn
 from metrics.abstract_metrics import CrossEntropyMetric
-from torchmetrics import Metric, MeanSquaredError
+from torchmetrics import Metric, MeanSquaredError, MeanMetric
+from graph_dit.diffusion import graph_lib
 
 # from 2:He to 119:*
 valencies_check = [0, 1, 2, 3, 4, 3, 2, 1, 0, 1, 2, 6, 6, 7, 6, 1, 0, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 4, 7, 6, 1, 0, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 4, 7, 6, 5, 6, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 4, 7, 6, 5, 0, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
@@ -91,4 +92,64 @@ class TrainLossDiscrete(nn.Module):
         if log:
             print(f"Epoch {current_epoch} finished: X_CE: {epoch_node_loss :.4f} -- E_CE: {epoch_edge_loss :.4f} "
                 f"Weight: {epoch_weight_loss :.4f} "
+                f"-- Time taken {time.time() - start_epoch_time:.1f}s ")
+
+
+
+class TrainLossScore(nn.Module):
+    """ Train with Cross entropy"""
+    def __init__(self, lambda_train, weight_node=None, weight_edge=None):
+        super().__init__()
+        self.node_loss = MeanMetric()
+        self.edge_loss = MeanMetric()
+        self.y_loss = MeanSquaredError()
+        self.weight_loss = AtomWeightMetric()
+        self.lambda_train = lambda_train
+
+    def forward(self, masked_pred_X, masked_pred_E, pred_y, true_X, true_E, true_y, node_mask, noisy_data, sigma, graph, log: bool):
+        """ Compute train metrics
+        masked_pred_X : tensor -- (bs, n, dx)
+        masked_pred_E : tensor -- (bs, n, n, de)
+        pred_y : tensor -- (bs, )
+        true_X : tensor -- (bs, n, dx)
+        true_E : tensor -- (bs, n, n, de)
+        true_y : tensor -- (bs, )
+        log : boolean. """
+
+        loss_weight = self.weight_loss(masked_pred_X, true_X)
+
+        true_X_labels = true_X.argmax(dim=-1)    # (bs, n)
+        pred_X_logits = masked_pred_X            # (bs, n, dx)
+        X_t_labels = noisy_data['X_t'].argmax(dim=-1)       # (bs, n)
+
+        true_E_labels = true_E.argmax(dim=-1)    # (bs, n, n)
+        pred_E_logits = masked_pred_E            # (bs, n, n, de)
+        E_t_labels = noisy_data['E_t'].argmax(dim=-1)  
+        
+        loss_X =  graph.score_entropy(pred_X_logits, noisy_data['sigma'][:, None], X_t_labels, true_X_labels)
+        loss_X = loss_X * node_mask.float()   
+        loss_X = (noisy_data['dsigma'][:, None] * loss_X).sum(dim=-1)  / node_mask.sum(dim=-1).clamp_min(1)
+        loss_X = loss_X.mean()
+        #loss_X = (noisy_data['dsigma'][:, None] * loss_X).sum(dim=-1).mean() 
+
+        loss_E =  graph.score_entropy(pred_E_logits, noisy_data['sigma'][:, None, None], E_t_labels, true_E_labels)
+        valid_edge = node_mask[:, :, None] & node_mask[:, None, :]  # (bs,n,n)
+        loss_E = loss_E * valid_edge.float()   # (bs,n,n)
+        loss_E = (noisy_data['dsigma'][:, None, None] * loss_E).sum(dim=(1,2)) / valid_edge.sum(dim=(1,2)).clamp_min(1)
+        loss_E = loss_E.mean()
+        #loss_E = (noisy_data['dsigma'][:, None, None] * loss_E).sum(dim=(1,2)).mean()
+        self.node_loss.update(loss_X)
+        self.edge_loss.update(loss_E)
+        return self.lambda_train[0] * loss_X + self.lambda_train[1] * loss_E  + self.lambda_train[2] *loss_weight
+
+    def reset(self):
+        for metric in [self.node_loss, self.edge_loss, self.y_loss]:
+            metric.reset()
+
+    def log_epoch_metrics(self, current_epoch, start_epoch_time, log=True):
+        epoch_node_loss = self.node_loss.compute() 
+        epoch_edge_loss = self.edge_loss.compute()
+
+        if log:
+            print(f"Epoch {current_epoch} finished: X_CE: {epoch_node_loss :.4f} -- E_CE: {epoch_edge_loss :.4f} "
                 f"-- Time taken {time.time() - start_epoch_time:.1f}s ")

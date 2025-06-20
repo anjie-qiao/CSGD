@@ -103,6 +103,25 @@ def sample_discrete_features(probX, probE, node_mask, step=None, add_nose=True):
     return PlaceHolder(X=X_t, E=E_t, y=torch.zeros(bs, 0).type_as(X_t))
 
 
+
+def sample_categorical(categorical_probs, method="hard"):
+    if method == "hard":
+        gumbel_norm = 1e-10 - (torch.rand_like(categorical_probs) + 1e-10).log()
+        return (categorical_probs / gumbel_norm).argmax(dim=-1)
+    else:
+        raise ValueError(f"Method {method} for sampling categorical variables is not valid.")
+    
+def gumbel_sample_discrete_features(probX, probE):
+    # Sample X
+    X_t = sample_categorical(probX, method="hard") 
+    # Sample E
+    E_t = sample_categorical(probE, method="hard")    # (bs, n, n)
+    E_t = torch.triu(E_t, diagonal=1)
+    E_t = (E_t + torch.transpose(E_t, 1, 2))
+
+    return PlaceHolder(X=X_t, E=E_t, y=torch.zeros(X_t.shape[0], 0).type_as(X_t))
+
+
 def compute_batched_over0_posterior_distribution(X_t, Qt, Qsb, Qtb):
     """ M: X or E
         Compute xt @ Qt.T * x0 @ Qsb / x0 @ Qtb @ xt.T for each possible value of x0

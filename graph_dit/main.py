@@ -6,7 +6,7 @@ import warnings
 import torch
 import hydra
 from omegaconf import DictConfig
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 
 import utils
 from datasets import dataset
@@ -16,6 +16,9 @@ from metrics.molecular_metrics_sampling import SamplingMolecularMetrics
 
 from analysis.visualization import MolecularVisualization
 
+os.environ['HYDRA_FULL_ERROR'] = '1'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
 
 warnings.filterwarnings("ignore", category=UserWarning)
 torch.set_float32_matmul_precision("medium")
@@ -78,6 +81,8 @@ def get_resume_adaptive(cfg, model_kwargs):
     version_base="1.1", config_path="../configs", config_name="config"
 )
 def main(cfg: DictConfig):
+
+    seed_everything(cfg.train.seed, workers=True) 
 
     datamodule = dataset.DataModule(cfg)
     datamodule.prepare_data()
