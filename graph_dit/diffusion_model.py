@@ -628,14 +628,22 @@ class Graph_DiT(pl.LightningModule):
 
         ### Guidance
         if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True)
-            guided_logscore_X = uncon_logscore_X.clone()
-            guided_logscore_E = uncon_logscore_E.clone()
+            base_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
+            base_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
+            guided_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
+            guided_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
             avg_guide_scale =  self.guide_scale / (self.ydim-1)
             for i in range(self.ydim-1):
-                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, condition_index=i)
+                uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True, condition_index=i)
+                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=i)
+                base_logscore_X += uncon_logscore_X
+                base_logscore_E += uncon_logscore_E
                 guided_logscore_X += avg_guide_scale * (logscore_X_cond - uncon_logscore_X)
                 guided_logscore_E += avg_guide_scale * (logscore_E_cond - uncon_logscore_E)
+            base_logscore_X /= (self.ydim - 1)
+            base_logscore_E /= (self.ydim - 1)
+            guide_X  = base_logscore_X + guided_logscore_X
+            guide_E = base_logscore_E + guided_logscore_E
 
             guide_X = guided_logscore_X.exp()
             stag_score_x = self.graph.staggered_score(guide_X, dsigma)
@@ -671,17 +679,25 @@ class Graph_DiT(pl.LightningModule):
         def get_prob(noisy_data, unconditioned=False, condition_index=0):
             pred = self.forward(noisy_data, unconditioned=unconditioned, condition_index=condition_index)
             return pred.X, pred.E
-
+       
         ### Guidance
         if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True)
-            guided_logscore_X = uncon_logscore_X.clone()
-            guided_logscore_E = uncon_logscore_E.clone()
+            base_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
+            base_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
+            guided_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
+            guided_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
             avg_guide_scale =  self.guide_scale / (self.ydim-1)
             for i in range(self.ydim-1):
-                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, condition_index=i)
+                uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True, condition_index=i)
+                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=i)
+                base_logscore_X += uncon_logscore_X
+                base_logscore_E += uncon_logscore_E
                 guided_logscore_X += avg_guide_scale * (logscore_X_cond - uncon_logscore_X)
                 guided_logscore_E += avg_guide_scale * (logscore_E_cond - uncon_logscore_E)
+            base_logscore_X /= (self.ydim - 1)
+            base_logscore_E /= (self.ydim - 1)
+            guide_X  = base_logscore_X + guided_logscore_X
+            guide_E = base_logscore_E + guided_logscore_E
 
             guide_X = guided_logscore_X.exp()
             stag_score_x = self.graph.staggered_score(guide_X, sigma)
