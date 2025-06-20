@@ -26,7 +26,7 @@ model:
     depth: 8
     num_heads: 16
     mlp_ratio: 4
-    drop_condition: 0.01
+    drop_condition: 0.1
     lambda_train: [1, 10, 2]  # node, edge and atom weight training weight 
     ensure_connected: True
 train:
