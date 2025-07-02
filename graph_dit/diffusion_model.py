@@ -153,7 +153,9 @@ class Graph_DiT(pl.LightningModule):
         # randomly select single condition
         # polymers (SA/SC, O2, N2, CO2)  ydim = 5 
         # BACE/BBBP/HIV (SA/SC， Class)  ydim = 3
-        selected_cond_idx = random.randint(0, self.ydim - 2)  
+        #selected_cond_idx = random.randint(0, self.ydim - 3) 
+        probs = [0.2, 0.2, 0.6]
+        selected_cond_idx = random.choices([0, 1, 2], weights=probs)[0]
 
         pred = self.forward(noisy_data, condition_index=selected_cond_idx)
         loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
@@ -326,7 +328,8 @@ class Graph_DiT(pl.LightningModule):
         #       f"Test Edge type KL: {metrics[2] :.2f}")
 
         ## final epcoh
-        samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
+        #samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
+        samples_left_to_generate = 1200
         samples_left_to_save = self.cfg.general.final_model_samples_to_save
         chains_left_to_save = self.cfg.general.final_model_chains_to_save
 
@@ -341,7 +344,7 @@ class Graph_DiT(pl.LightningModule):
         while samples_left_to_generate > 0:
             print(f'samples left to generate: {samples_left_to_generate}/'
                 f'{self.cfg.general.final_model_samples_to_generate}', end='', flush=True)
-            bs = int(0.5 * self.cfg.train.batch_size)
+            bs = int(1 * self.cfg.train.batch_size)
             to_generate = min(samples_left_to_generate, bs)
             to_save = min(samples_left_to_save, bs)
             chains_save = min(chains_left_to_save, bs)
@@ -612,46 +615,32 @@ class Graph_DiT(pl.LightningModule):
         noisy_data = {'t': t,  'sigma': curr_sigma.squeeze(-1), 'dsigma': dsigma.squeeze(-1), 'X_t': X_t, 'E_t': E_t, 'y_t': y_t
         ,'index_x': X_t.argmax(dim=-1) ,'index_e': E_t.argmax(dim=-1) ,'node_mask': node_mask}
        
-        # def get_prob(noisy_data, unconditioned=False):
-        #     pred = self.forward(noisy_data, unconditioned=unconditioned)
-        #     pred.X = pred.X.exp()
-        #     stag_score_x = self.graph.staggered_score(pred.X, dsigma)
-        #     probs_x = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
-      
-        #     pred.E = pred.E.exp()
-        #     stag_score_e = self.graph.staggered_score(pred.E, dsigma)
-        #     probs_e = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])
-        #     return probs_x, probs_e
         def get_prob(noisy_data, unconditioned=False, condition_index=0):
             pred = self.forward(noisy_data, unconditioned=unconditioned, condition_index=condition_index)
             return pred.X, pred.E
 
-        ### Guidance
+        ## Guidance
         if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            base_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
-            base_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
+            base_logscore_X, base_logscore_E = get_prob(noisy_data, unconditioned=True)
             guided_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
             guided_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
-            avg_guide_scale =  self.guide_scale / (self.ydim-1)
-            for i in range(self.ydim-1):
-                uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True, condition_index=i)
+            #avg_guide_scale =  self.guide_scale / (self.ydim-3)
+            weights = torch.tensor([0.4, 0.6], device=self.device, dtype=torch.float32)
+            for i in range(self.ydim-3):
                 logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=i)
-                base_logscore_X += uncon_logscore_X
-                base_logscore_E += uncon_logscore_E
-                guided_logscore_X += avg_guide_scale * (logscore_X_cond - uncon_logscore_X)
-                guided_logscore_E += avg_guide_scale * (logscore_E_cond - uncon_logscore_E)
-            base_logscore_X /= (self.ydim - 1)
-            base_logscore_E /= (self.ydim - 1)
+                guided_logscore_X += self.guide_scale * weights[i] * (logscore_X_cond - base_logscore_X)
+                guided_logscore_E += self.guide_scale * weights[i] * (logscore_E_cond - base_logscore_E)
+            
             guide_X  = base_logscore_X + guided_logscore_X
             guide_E = base_logscore_E + guided_logscore_E
 
             guide_X = guide_X.exp()
             stag_score_x = self.graph.staggered_score(guide_X, dsigma)
             prob_X = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], dsigma[..., None])
-      
+        
             guide_E= guide_E.exp()
             stag_score_e = self.graph.staggered_score(guide_E, dsigma)
-            prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])      
+            prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], dsigma[..., None, None])     
 
         sampled_s = diffusion_utils.gumbel_sample_discrete_features(prob_X, prob_E)
 
@@ -679,30 +668,25 @@ class Graph_DiT(pl.LightningModule):
         def get_prob(noisy_data, unconditioned=False, condition_index=0):
             pred = self.forward(noisy_data, unconditioned=unconditioned, condition_index=condition_index)
             return pred.X, pred.E
-       
-        ### Guidance
+
+        ## Guidance
         if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            base_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
-            base_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
+            base_logscore_X, base_logscore_E = get_prob(noisy_data, unconditioned=True)
             guided_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
             guided_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
-            avg_guide_scale =  self.guide_scale / (self.ydim-1)
-            for i in range(self.ydim-1):
-                uncon_logscore_X, uncon_logscore_E = get_prob(noisy_data, unconditioned=True, condition_index=i)
+            #avg_guide_scale =  self.guide_scale / (self.ydim-3)
+            weights = torch.tensor([0.4, 0.6], device=self.device, dtype=torch.float32)
+            for i in range(self.ydim-3):
                 logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=i)
-                base_logscore_X += uncon_logscore_X
-                base_logscore_E += uncon_logscore_E
-                guided_logscore_X += avg_guide_scale * (logscore_X_cond - uncon_logscore_X)
-                guided_logscore_E += avg_guide_scale * (logscore_E_cond - uncon_logscore_E)
-            base_logscore_X /= (self.ydim - 1)
-            base_logscore_E /= (self.ydim - 1)
+                guided_logscore_X += self.guide_scale * weights[i] * (logscore_X_cond - base_logscore_X)
+                guided_logscore_E += self.guide_scale * weights[i] * (logscore_E_cond - base_logscore_E)
             guide_X  = base_logscore_X + guided_logscore_X
             guide_E = base_logscore_E + guided_logscore_E
 
             guide_X = guide_X.exp()
             stag_score_x = self.graph.staggered_score(guide_X, sigma)
             prob_X = stag_score_x * self.graph.transp_transition(noisy_data['index_x'], sigma[..., None])
-      
+
             guide_E= guide_E.exp()
             stag_score_e = self.graph.staggered_score(guide_E, sigma)
             prob_E = stag_score_e * self.graph.transp_transition(noisy_data['index_e'], sigma[..., None, None])      

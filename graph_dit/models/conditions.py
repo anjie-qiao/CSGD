@@ -47,10 +47,11 @@ class CategoricalEmbedder(nn.Module):
     Embeds categorical conditions such as data sources into vector representations. 
     Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, shared_null_emb):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        #self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.embedding_table = shared_null_emb
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
 
@@ -77,12 +78,13 @@ class CategoricalEmbedder(nn.Module):
         return embeddings
     
 class ClusterContinuousEmbedder(nn.Module):
-    def __init__(self, input_size, hidden_size, dropout_prob):
+    def __init__(self, input_size, hidden_size, dropout_prob, shared_null_emb):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
 
-        if use_cfg_embedding:
-            self.embedding_drop = nn.Embedding(1, hidden_size)
+        # if use_cfg_embedding:
+        #     self.embedding_drop = nn.Embedding(1, hidden_size)
+        self.embedding_drop = shared_null_emb
 
         self.mlp = nn.Sequential(
             nn.Linear(input_size, hidden_size, bias=True),

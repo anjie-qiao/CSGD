@@ -32,13 +32,15 @@ class Denoiser(nn.Module):
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedding_list = torch.nn.ModuleList()
         self.graph_type = graph_type
-
-        self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition))
+        
+        self.shared_null_emb = nn.Embedding(1, hidden_size)
+        self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition, self.shared_null_emb))
         for i in range(ydim - 2):
             if task_type == 'regression':
-                self.y_embedding_list.append(ClusterContinuousEmbedder(1, hidden_size, drop_condition))
+                self.y_embedding_list.append(ClusterContinuousEmbedder(1, hidden_size, drop_condition, self.shared_null_emb))
             else:
-                self.y_embedding_list.append(CategoricalEmbedder(2, hidden_size, drop_condition))
+                self.y_embedding_list.append(CategoricalEmbedder(2, hidden_size, drop_condition, self.shared_null_emb))
+
 
         self.encoders = nn.ModuleList(
             [
@@ -94,9 +96,18 @@ class Denoiser(nn.Module):
 
         if condition_index == 0:
             c2 = self.y_embedding_list[0](y[:, :2], self.training, force_drop_id, t)
+        elif condition_index == 1:
+            c2 = torch.zeros_like(c1)
+            for i in range(condition_index, self.ydim-1):
+                start_index = i + 1
+                c2 = c2 + self.y_embedding_list[i](y[:, start_index:start_index+1], self.training, force_drop_id, t)
+            c2 =  c2 / (self.ydim-2)
         else:
-            start_index = condition_index + 1
-            c2 = self.y_embedding_list[condition_index](y[:, start_index:start_index+1], self.training, force_drop_id, t)
+            c2 = self.y_embedding_list[0](y[:, :2], self.training, force_drop_id, t)
+            for i in range(condition_index-1, self.ydim-1):
+                start_index = i + 1
+                c2 = c2 + self.y_embedding_list[i](y[:, start_index:start_index+1], self.training, force_drop_id, t)
+            c2 =  c2 / (self.ydim-1)
         
         c = c1 + c2
         
