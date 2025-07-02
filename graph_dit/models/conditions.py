@@ -47,12 +47,14 @@ class CategoricalEmbedder(nn.Module):
     Embeds categorical conditions such as data sources into vector representations. 
     Also handles label dropout for classifier-free guidance.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, shared_null_emb):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.embedding_drop = shared_null_emb
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
+        self.hidden_size = hidden_size
 
     def token_drop(self, labels, force_drop_ids=None):
         """
@@ -68,21 +70,36 @@ class CategoricalEmbedder(nn.Module):
     def forward(self, labels, train, force_drop_ids=None, t=None):
         labels = labels.long().view(-1)
         use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
+        # if (train and use_dropout) or (force_drop_ids is not None):
+        #     labels = self.token_drop(labels, force_drop_ids)
+        if force_drop_ids is not None:
+            drop_ids = force_drop_ids == 1
+        else:
+            drop_ids = None
+        if (train and use_dropout):
+            drop_ids_rand = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+            if force_drop_ids is not None:
+                drop_ids = torch.logical_or(drop_ids, drop_ids_rand)
+            else:
+                drop_ids = drop_ids_rand
+        #embeddings = self.embedding_table(labels)
+        if drop_ids is not None:
+            embeddings = torch.zeros((labels.shape[0], self.hidden_size), device=labels.device)
+            embeddings[~drop_ids] = self.embedding_table(labels[~drop_ids])
+            embeddings[drop_ids] += self.embedding_drop.weight[0]
         if True and train:
             noise = torch.randn_like(embeddings)
             embeddings = embeddings + noise
         return embeddings
     
 class ClusterContinuousEmbedder(nn.Module):
-    def __init__(self, input_size, hidden_size, dropout_prob):
+    def __init__(self, input_size, hidden_size, dropout_prob, shared_null_emb):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
 
-        if use_cfg_embedding:
-            self.embedding_drop = nn.Embedding(1, hidden_size)
+        # if use_cfg_embedding:
+        #     self.embedding_drop = nn.Embedding(1, hidden_size)
+        self.embedding_drop = shared_null_emb
 
         self.mlp = nn.Sequential(
             nn.Linear(input_size, hidden_size, bias=True),

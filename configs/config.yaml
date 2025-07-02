@@ -57,6 +57,6 @@ noise:
   sampling_eps: 1e-5
 
 graph:
-  type: absorb   #uniform or absorb
+  type: uniform   #uniform or absorb
   x_dim: 
   e_dim:

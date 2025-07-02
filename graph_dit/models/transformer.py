@@ -32,13 +32,15 @@ class Denoiser(nn.Module):
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedding_list = torch.nn.ModuleList()
         self.graph_type = graph_type
-
-        self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition))
+        
+        self.shared_null_emb = nn.Embedding(1, hidden_size)
+        self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition, self.shared_null_emb))
         for i in range(ydim - 2):
             if task_type == 'regression':
-                self.y_embedding_list.append(ClusterContinuousEmbedder(1, hidden_size, drop_condition))
+                self.y_embedding_list.append(ClusterContinuousEmbedder(1, hidden_size, drop_condition, self.shared_null_emb))
             else:
-                self.y_embedding_list.append(CategoricalEmbedder(2, hidden_size, drop_condition))
+                self.y_embedding_list.append(CategoricalEmbedder(2, hidden_size, drop_condition, self.shared_null_emb))
+
 
         self.encoders = nn.ModuleList(
             [
@@ -78,7 +80,7 @@ class Denoiser(nn.Module):
             _constant_init(block.adaLN_modulation[0], 0)
         _constant_init(self.out_layer.adaLN_modulation[0], 0)
 
-    def forward(self, x, e, node_mask, y, t, index_x, index_e, unconditioned):
+    def forward(self, x, e, node_mask, y, t, index_x, index_e, unconditioned, condition_index):
         
         force_drop_id = torch.zeros_like(y.sum(-1))
         force_drop_id[torch.isnan(y.sum(-1))] = 1
@@ -91,11 +93,22 @@ class Denoiser(nn.Module):
         x = self.x_embedder(x)
 
         c1 = self.t_embedder(t)
-        for i in range(1, self.ydim):
-            if i == 1:
-                c2 = self.y_embedding_list[i-1](y[:, :2], self.training, force_drop_id, t)
-            else:
-                c2 = c2 + self.y_embedding_list[i-1](y[:, i:i+1], self.training, force_drop_id, t)
+
+        if condition_index == 0:
+            c2 = self.y_embedding_list[0](y[:, :2], self.training, force_drop_id, t)
+        elif condition_index == 1:
+            c2 = torch.zeros_like(c1)
+            for i in range(condition_index, self.ydim-1):
+                start_index = i + 1
+                c2 = c2 + self.y_embedding_list[i](y[:, start_index:start_index+1], self.training, force_drop_id, t)
+            c2 =  c2 / (self.ydim-2)
+        else:
+            c2 = self.y_embedding_list[0](y[:, :2], self.training, force_drop_id, t)
+            for i in range(condition_index-1, self.ydim-1):
+                start_index = i + 1
+                c2 = c2 + self.y_embedding_list[i](y[:, start_index:start_index+1], self.training, force_drop_id, t)
+            c2 =  c2 / (self.ydim-1)
+        
         c = c1 + c2
         
         for i, block in enumerate(self.encoders):
