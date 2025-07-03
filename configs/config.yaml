@@ -3,7 +3,8 @@ general:
     wandb: 'disabled' 
     gpus: 1
     resume: null
-    test_only: null
+    #test_only: null
+    test_only: /home/qiaoanjie/qiaoanjie/GraphDiT/graph_dit/outputs/2025-07-03/10-52-18/checkpoints/graph_dit/last.ckpt
     sample_every_val: 2500
     samples_to_generate: 512      
     samples_to_save: 3

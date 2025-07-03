@@ -131,12 +131,12 @@ class Graph_DiT(pl.LightningModule):
         self.min_lr_factor = cfg.train.min_lr_factor
         self.start_decay  = int(self.n_epochs * 0.6)
 
-    def forward(self, noisy_data, unconditioned=False, condition_index=0):
+    def forward(self, noisy_data, condition_index, unconditioned=False, train=False):
         x, e, y = noisy_data['X_t'].float(), noisy_data['E_t'].float(), noisy_data['y_t'].float().clone()
         node_mask, t, sigma =  noisy_data['node_mask'], noisy_data['t'], noisy_data['sigma']
         index_x, index_e = noisy_data['index_x'], noisy_data['index_e']
         # in contionous-time diffusion, sigma replaces the timestep t as the condition
-        pred = self.model(x, e, node_mask, y=y, t=sigma, index_x=index_x, index_e=index_e, unconditioned=unconditioned, condition_index=condition_index)
+        pred = self.model(x, e, node_mask, y=y, t=sigma, index_x=index_x, index_e=index_e, unconditioned=unconditioned, condition_index=condition_index, train=train)
         return pred
         
     def training_step(self, data, i):
@@ -154,10 +154,13 @@ class Graph_DiT(pl.LightningModule):
         # polymers (SA/SC, O2, N2, CO2)  ydim = 5 
         # BACE/BBBP/HIV (SA/SC， Class)  ydim = 3
         #selected_cond_idx = random.randint(0, self.ydim - 3) 
-        probs = [0.2, 0.2, 0.6]
-        selected_cond_idx = random.choices([0, 1, 2], weights=probs)[0]
-
-        pred = self.forward(noisy_data, condition_index=selected_cond_idx)
+        # probs = torch.tensor([1.0, 1.0, 1.0, 1.0], device=self.device)
+        # probs = probs / probs.sum()
+        # # (bs, 1)
+        # selected_cond_idx = torch.multinomial(probs, num_samples=X.shape[0], replacement=True).unsqueeze(1)  
+        selected_cond_idx = torch.argsort(torch.rand(X.shape[0], self.ydim - 1, device=self.device), dim=1)
+     
+        pred = self.forward(noisy_data, condition_index=selected_cond_idx, train=True)
         loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
                             true_X=X, true_E=E, true_y=data.y, node_mask=node_mask, 
                             noisy_data=noisy_data,
@@ -230,7 +233,8 @@ class Graph_DiT(pl.LightningModule):
         dense_data, node_mask = utils.to_dense(data_x, data.edge_index, data_edge_attr, data.batch, self.max_n_nodes)
         dense_data = dense_data.mask(node_mask)
         noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
-        pred = self.forward(noisy_data)
+        selected_cond_idx = torch.full((dense_data.X.shape[0], 1), fill_value=0, dtype=torch.long, device=self.device)
+        pred = self.forward(noisy_data, condition_index=selected_cond_idx)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=False)
         self.val_y_collection.append(data.y)
         self.log(f'valid_nll', nll, batch_size=data.x.size(0), sync_dist=True)
@@ -314,7 +318,8 @@ class Graph_DiT(pl.LightningModule):
         dense_data, node_mask = utils.to_dense(data_x, data.edge_index, data_edge_attr, data.batch, self.max_n_nodes)
         dense_data = dense_data.mask(node_mask)
         noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
-        pred = self.forward(noisy_data)
+        selected_cond_idx = torch.full((dense_data.X.shape[0], 1), fill_value=0, dtype=torch.long, device=self.device)
+        pred = self.forward(noisy_data, condition_index=selected_cond_idx)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=True)
         self.test_y_collection.append(data.y)
         return {'loss': nll}
@@ -328,8 +333,8 @@ class Graph_DiT(pl.LightningModule):
         #       f"Test Edge type KL: {metrics[2] :.2f}")
 
         ## final epcoh
-        #samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
-        samples_left_to_generate = 1200
+        samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
+        #samples_left_to_generate = 1200
         samples_left_to_save = self.cfg.general.final_model_samples_to_save
         chains_left_to_save = self.cfg.general.final_model_chains_to_save
 
@@ -621,13 +626,16 @@ class Graph_DiT(pl.LightningModule):
 
         ## Guidance
         if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            base_logscore_X, base_logscore_E = get_prob(noisy_data, unconditioned=True)
+            cond_idx = torch.full((bs, 1), fill_value=0, dtype=torch.long, device=self.device)
+            base_logscore_X, base_logscore_E = get_prob(noisy_data, unconditioned=True, condition_index=cond_idx)
             guided_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
             guided_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
-            #avg_guide_scale =  self.guide_scale / (self.ydim-3)
-            weights = torch.tensor([0.4, 0.6], device=self.device, dtype=torch.float32)
-            for i in range(self.ydim-3):
-                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=i)
+            #avg_guide_scale =  self.guide_scale / (self.ydim-1)
+            #weights = torch.tensor([0.4, 0.2, 0.2, 0.2], device=self.device, dtype=torch.float32)
+            weights = torch.tensor([0.25, 0.25, 0.25, 0.25], device=self.device, dtype=torch.float32)
+            for i in range(self.ydim-1):
+                selected_cond_idx = torch.full((bs, 1), fill_value=i, dtype=torch.long, device=self.device)
+                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=selected_cond_idx)
                 guided_logscore_X += self.guide_scale * weights[i] * (logscore_X_cond - base_logscore_X)
                 guided_logscore_E += self.guide_scale * weights[i] * (logscore_E_cond - base_logscore_E)
             
@@ -671,13 +679,16 @@ class Graph_DiT(pl.LightningModule):
 
         ## Guidance
         if self.guidance_target is not None and self.guide_scale is not None and self.guide_scale != 1:
-            base_logscore_X, base_logscore_E = get_prob(noisy_data, unconditioned=True)
+            cond_idx = torch.full((bs, 1), fill_value=0, dtype=torch.long, device=self.device)
+            base_logscore_X, base_logscore_E = get_prob(noisy_data, unconditioned=True, condition_index=cond_idx)
             guided_logscore_X = torch.zeros(X_t.shape, device=self.device, dtype=torch.float32)
             guided_logscore_E = torch.zeros(E_t.shape, device=self.device, dtype=torch.float32)
-            #avg_guide_scale =  self.guide_scale / (self.ydim-3)
-            weights = torch.tensor([0.4, 0.6], device=self.device, dtype=torch.float32)
-            for i in range(self.ydim-3):
-                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=i)
+            #avg_guide_scale =  self.guide_scale / (self.ydim-1)
+            #weights = torch.tensor([0.4, 0.2, 0.2, 0.2], device=self.device, dtype=torch.float32)
+            weights = torch.tensor([0.25, 0.25, 0.25, 0.25], device=self.device, dtype=torch.float32)
+            for i in range(self.ydim-1):
+                selected_cond_idx = torch.full((bs, 1), fill_value=i, dtype=torch.long, device=self.device)
+                logscore_X_cond, logscore_E_cond = get_prob(noisy_data, unconditioned=False, condition_index=selected_cond_idx)
                 guided_logscore_X += self.guide_scale * weights[i] * (logscore_X_cond - base_logscore_X)
                 guided_logscore_E += self.guide_scale * weights[i] * (logscore_E_cond - base_logscore_E)
             guide_X  = base_logscore_X + guided_logscore_X
