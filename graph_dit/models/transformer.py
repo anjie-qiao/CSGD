@@ -23,6 +23,7 @@ class Denoiser(nn.Module):
         ydim=3,
         task_type='regression',
         graph_type = "uniform",
+        cfg_type= 'standard'
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -32,14 +33,19 @@ class Denoiser(nn.Module):
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedding_list = torch.nn.ModuleList()
         self.graph_type = graph_type
+        self.cfg_type =cfg_type
+        self.task_type = task_type
         
-        self.shared_null_emb = nn.Embedding(1, hidden_size)
+        if self.cfg_type == 'standard':
+            self.shared_null_emb = None
+        else:
+            self.shared_null_emb = nn.Embedding(1, hidden_size)
         self.y_embedding_list.append(ClusterContinuousEmbedder(2, hidden_size, drop_condition, self.shared_null_emb))
         for i in range(ydim - 2):
             if task_type == 'regression':
                 self.y_embedding_list.append(ClusterContinuousEmbedder(1, hidden_size, drop_condition, self.shared_null_emb))
             else:
-                self.y_embedding_list.append(CategoricalEmbedder(2, hidden_size, drop_condition, self.shared_null_emb))
+                self.y_embedding_list.append(CategoricalEmbedder(2, hidden_size, drop_condition, self.cfg_type))
 
 
         self.encoders = nn.ModuleList(
@@ -94,41 +100,48 @@ class Denoiser(nn.Module):
 
         c1 = self.t_embedder(t)
 
-        c2_list = []
-        for i in range(1, self.ydim):
-            if i == 1:
-                c2_list.append(self.y_embedding_list[i-1](y[:, :2], self.training, force_drop_id, t)) 
-            else:
-                c2_list.append(self.y_embedding_list[i-1](y[:, i:i+1], self.training, force_drop_id, t)) 
-        # (cond_num, bs, hidden_size)
-        c2_tensor = torch.stack(c2_list, dim=0)
-        # (bs, cond_num, hidden_size)
-        c2_tensor = c2_tensor.permute(1, 0, 2)  
-        if train:
-            # [bs,cond_num,hidden]
-            selected_embs = torch.gather(c2_tensor, dim=1, index=condition_index.unsqueeze(-1).expand(-1, -1, c2_tensor.size(2)))  
+        if self.cfg_type == 'standard' or self.task_type == 'classification':
+            for i in range(1, self.ydim):
+                if i == 1:
+                    c2 = self.y_embedding_list[i-1](y[:, :2], self.training, force_drop_id)
+                else:
+                    c2 = c2 + self.y_embedding_list[i-1](y[:, i:i+1], self.training, force_drop_id)
+        else:
+            c2_list = []
+            for i in range(1, self.ydim):
+                if i == 1:
+                    c2_list.append(self.y_embedding_list[i-1](y[:, :2], self.training, force_drop_id, t)) 
+                else:
+                    c2_list.append(self.y_embedding_list[i-1](y[:, i:i+1], self.training, force_drop_id, t)) 
+            # (cond_num, bs, hidden_size)
+            c2_tensor = torch.stack(c2_list, dim=0)
+            # (bs, cond_num, hidden_size)
+            c2_tensor = c2_tensor.permute(1, 0, 2)  
+            if train:
+                # [bs,cond_num,hidden]
+                selected_embs = torch.gather(c2_tensor, dim=1, index=condition_index.unsqueeze(-1).expand(-1, -1, c2_tensor.size(2)))  
 
-            # [bs]
-            # k = torch.randint(1, self.ydim, (bs,), device=c2_tensor.device)
-            probs = torch.tensor([0.4, 0.0, 0.0, 0.6], device=c2_tensor.device) 
-            probs = probs / probs.sum() 
-            k_idx = torch.multinomial(probs, num_samples=bs, replacement=True)
-            k = k_idx + 1
+                # [bs]
+                k = torch.randint(1, self.ydim, (bs,), device=c2_tensor.device)
+                # probs = torch.tensor([0.25, 0.25, 0.25, 0.25], device=c2_tensor.device) 
+                # probs = probs / probs.sum() 
+                # k_idx = torch.multinomial(probs, num_samples=bs, replacement=True)
+                # k = k_idx + 1
 
-            # [bs,cond_num]
-            idxs = torch.arange(self.ydim-1, device=c2_tensor.device).unsqueeze(0).expand(bs, -1)
-            mask = idxs < k.unsqueeze(1) 
+                # [bs,cond_num]
+                idxs = torch.arange(self.ydim-1, device=c2_tensor.device).unsqueeze(0).expand(bs, -1)
+                mask = idxs < k.unsqueeze(1) 
 
-            # [bs,cond_num,1]
-            mask_f = mask.unsqueeze(-1).float()
-            # [bs, hidden_size]
-            sum_embs = (selected_embs * mask_f).sum(dim=1)
-            c2 = sum_embs / k.unsqueeze(1).float()
-        else: 
-            # (bs, 1, hidden_size)
-            c2 = torch.gather(c2_tensor, dim=1, index=condition_index.unsqueeze(-1).expand(-1, 1, c2_tensor.size(2)))
-            # (bs, hidden_size)
-            c2 = c2.squeeze(1)
+                # [bs,cond_num,1]
+                mask_f = mask.unsqueeze(-1).float()
+                # [bs, hidden_size]
+                sum_embs = (selected_embs * mask_f).sum(dim=1)
+                c2 = sum_embs / k.unsqueeze(1).float()
+            else: 
+                # (bs, 1, hidden_size)
+                c2 = torch.gather(c2_tensor, dim=1, index=condition_index.unsqueeze(-1).expand(-1, 1, c2_tensor.size(2)))
+                # (bs, hidden_size)
+                c2 = c2.squeeze(1)
         c = c1 + c2
         
         for i, block in enumerate(self.encoders):
