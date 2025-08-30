@@ -45,7 +45,7 @@ train:
     eps: 1e-8
     min_lr_factor: 0.3
     CFG_type: composable #[standard, composable]
-    temp_scaling: False
+    temp_scaling: True
 dataset:
     datadir: 'data/'
     task_name: null

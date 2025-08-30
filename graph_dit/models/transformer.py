@@ -36,7 +36,7 @@ class Denoiser(nn.Module):
         self.cfg_type =cfg_type
         self.task_type = task_type
         
-        if self.cfg_type == 'standard':
+        if self.cfg_type == 'standard' or self.task_type == 'classification':
             self.shared_null_emb = None
         else:
             self.shared_null_emb = nn.Embedding(1, hidden_size)
