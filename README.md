@@ -1,15 +1,11 @@
-Graph Diffusion Transformer for Multi-Conditional Molecular Generation
+Composable Score-based Graph Diffusion Model for Multi-Conditional Molecular Generation
 ================================================================
-
-Paper: https://arxiv.org/abs/2401.13858 (NeurIPS 2024 Oral)
-
-This is the code for Graph DiT. The denoising model architecture in `graph_dit/models` looks like:
+This is the code for CSGD (Composable Score-based Graph Diffusion model):
 
 <div style="display: flex;" markdown="1">
-      <img src="asset/reverse.png" style="width: 45%;" alt="Description of the first image">
-      <img src="asset/arch.png" style="width: 45%;" alt="Description of the second image">
+      <img src="asset/framework.png" style="width: 90%;" alt="Description of the first image">
+ 
 </div>
-
 
 ## Requirements
 All dependencies are specified in the `requirements.txt` file.
@@ -24,7 +20,7 @@ And `mini_moses` package: `pip install git+https://github.com/igor-krawczuk/mini
 
 ## Usage
 
-We could train the model on an A6000 GPU card. Here is an example to running the code for polymer graphs:
+We could train the model on an A800 GPU card. Here is an example to running the code for polymer graphs:
 
 ```
 python main.py --config-name=config.yaml \
@@ -48,37 +44,5 @@ python main.py --config-name=config.yaml \
 python main.py --config-name=config.yaml \
                 dataset.task_name='hiv_b' \
                 dataset.guidance_target='HIV_active'
-```
-
-We could generate polymer graphs by conditioning on single gas permeability.
-
-```
-
-python main.py --config-name=config.yaml \
-                dataset.task_name='O2' \
-                dataset.guidance_target='O2'
-
-python main.py --config-name=config.yaml \
-                dataset.task_name='N2' \
-                dataset.guidance_target='N2'
-
-python main.py --config-name=config.yaml \
-                dataset.task_name='CO2' \
-                dataset.guidance_target='CO2'
-```
-
-Feel free to test the code on your own dataset!
-
-## Citation
-
-If you find this repository useful, please cite our paper:
-
-```
-@inproceedings{liu2024graphdit,
-  title={Graph Diffusion Transformers for Multi-Conditional Molecular Generation},
-  author={Liu, Gang and Xu, Jiaxin and Luo, Tengfei and Jiang, Meng},
-  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
-  year={2024}
-}
 ```
 
