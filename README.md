@@ -28,7 +28,7 @@ python main.py --config-name=config.yaml \
                 dataset.task_name='O2-N2-CO2' \
                 dataset.guidance_target='O2-N2-CO2'
 ```
-All default configurations can be found in `configs/config.yaml`. In this example, we set `model.ensure_connected=True` to ensure that all generated components are retained during graph-to-molecule conversion (see paper Section 3.2).
+All default configurations can be found in `configs`.
 
 Other examples for small molecule generation:
 
