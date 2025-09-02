@@ -1,8 +1,8 @@
 Composable Score-based Graph Diffusion Model for Multi-Conditional Molecular Generation
 ================================================================
-This is the code for CSGD (Composable Score-based Graph Diffusion model):
+This is the code for CSGD (**C**omposable **S**core-based **G**raph **D**iffusion model):
 
-<div style="display: flex;" markdown="1">
+<div style="display: flex; justify-content: center;" markdown="1">
       <img src="asset/framework.png" style="width: 90%;" alt="Description of the first image">
  
 </div>
