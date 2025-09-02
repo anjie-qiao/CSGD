@@ -1,15 +1,11 @@
-Graph Diffusion Transformer for Multi-Conditional Molecular Generation
+Composable Score-based Graph Diffusion Model for Multi-Conditional Molecular Generation
 ================================================================
+This is the code for CSGD (**C**omposable **S**core-based **G**raph **D**iffusion model):
 
-Paper: https://arxiv.org/abs/2401.13858 (NeurIPS 2024 Oral)
-
-This is the code for Graph DiT. The denoising model architecture in `graph_dit/models` looks like:
-
-<div style="display: flex;" markdown="1">
-      <img src="asset/reverse.png" style="width: 45%;" alt="Description of the first image">
-      <img src="asset/arch.png" style="width: 45%;" alt="Description of the second image">
+<div style="display: flex; justify-content: center;" markdown="1">
+      <img src="asset/framework.png" style="width: 100%;" alt="Description of the first image">
+ 
 </div>
-
 
 ## Requirements
 All dependencies are specified in the `requirements.txt` file.
@@ -24,7 +20,7 @@ And `mini_moses` package: `pip install git+https://github.com/igor-krawczuk/mini
 
 ## Usage
 
-We could train the model on an A6000 GPU card. Here is an example to running the code for polymer graphs:
+We could train the model on an A800 GPU card. Here is an example to running the code for polymer graphs:
 
 ```
 python main.py --config-name=config.yaml \
@@ -32,7 +28,7 @@ python main.py --config-name=config.yaml \
                 dataset.task_name='O2-N2-CO2' \
                 dataset.guidance_target='O2-N2-CO2'
 ```
-All default configurations can be found in `configs/config.yaml`. In this example, we set `model.ensure_connected=True` to ensure that all generated components are retained during graph-to-molecule conversion (see paper Section 3.2).
+All default configurations can be found in `configs`.
 
 Other examples for small molecule generation:
 
@@ -48,37 +44,5 @@ python main.py --config-name=config.yaml \
 python main.py --config-name=config.yaml \
                 dataset.task_name='hiv_b' \
                 dataset.guidance_target='HIV_active'
-```
-
-We could generate polymer graphs by conditioning on single gas permeability.
-
-```
-
-python main.py --config-name=config.yaml \
-                dataset.task_name='O2' \
-                dataset.guidance_target='O2'
-
-python main.py --config-name=config.yaml \
-                dataset.task_name='N2' \
-                dataset.guidance_target='N2'
-
-python main.py --config-name=config.yaml \
-                dataset.task_name='CO2' \
-                dataset.guidance_target='CO2'
-```
-
-Feel free to test the code on your own dataset!
-
-## Citation
-
-If you find this repository useful, please cite our paper:
-
-```
-@inproceedings{liu2024graphdit,
-  title={Graph Diffusion Transformers for Multi-Conditional Molecular Generation},
-  author={Liu, Gang and Xu, Jiaxin and Luo, Tengfei and Jiang, Meng},
-  booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
-  year={2024}
-}
 ```
 

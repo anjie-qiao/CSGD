@@ -44,50 +44,62 @@ class TimestepEmbedder(nn.Module):
 
 class CategoricalEmbedder(nn.Module):
     """
-    Embeds categorical conditions such as data sources into vector representations. 
-    Also handles label dropout for classifier-free guidance.
+    Embeds categorical conditions (e.g., data source labels) into vector representations.
+    Supports label dropout for classifier-free guidance.
+
+    Parameters
+    ----------
+    num_classes : int
+        Number of distinct label categories.
+    hidden_size : int
+        Size of the embedding vectors.
+    dropout_prob : float
+        Probability of label dropout.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob, shared_null_emb):
+    def __init__(self, num_classes, hidden_size, dropout_prob, cfg_type):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
-        self.embedding_drop = shared_null_emb
         self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
-        self.hidden_size = hidden_size
-
-    def token_drop(self, labels, force_drop_ids=None):
-        """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        if cfg_type == 'standard':
+            self.dropout_prob = dropout_prob
         else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
+            self.dropout_prob = 0
 
-    def forward(self, labels, train, force_drop_ids=None, t=None):
+    def forward(self, labels, train, force_drop_ids=None):
+        """
+        Forward pass for categorical embedding with optional label dropout.
+
+        Parameters
+        ----------
+        labels : torch.Tensor
+            Tensor of categorical labels.
+        train : bool
+            Whether the model is in training mode.
+        force_drop_ids : torch.Tensor or None, optional
+            Explicit mask for which labels to drop.
+
+        Returns
+        -------
+        torch.Tensor
+            Embedded label representations, with optional noise added during training.
+        """
         labels = labels.long().view(-1)
+
         use_dropout = self.dropout_prob > 0
-        # if (train and use_dropout) or (force_drop_ids is not None):
-        #     labels = self.token_drop(labels, force_drop_ids)
-        if force_drop_ids is not None:
-            drop_ids = force_drop_ids == 1
-        else:
-            drop_ids = None
+        drop_ids = force_drop_ids == 1
+
         if (train and use_dropout):
             drop_ids_rand = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
             if force_drop_ids is not None:
                 drop_ids = torch.logical_or(drop_ids, drop_ids_rand)
             else:
                 drop_ids = drop_ids_rand
-        #embeddings = self.embedding_table(labels)
-        if drop_ids is not None:
-            embeddings = torch.zeros((labels.shape[0], self.hidden_size), device=labels.device)
-            embeddings[~drop_ids] = self.embedding_table(labels[~drop_ids])
-            embeddings[drop_ids] += self.embedding_drop.weight[0]
-        if True and train:
+        
+        if use_dropout:
+            labels = torch.where(drop_ids, self.num_classes, labels)
+        embeddings = self.embedding_table(labels)
+        if train:
             noise = torch.randn_like(embeddings)
             embeddings = embeddings + noise
         return embeddings
@@ -97,9 +109,10 @@ class ClusterContinuousEmbedder(nn.Module):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
 
-        # if use_cfg_embedding:
-        #     self.embedding_drop = nn.Embedding(1, hidden_size)
-        self.embedding_drop = shared_null_emb
+        if use_cfg_embedding and shared_null_emb is not None:
+            self.embedding_drop = shared_null_emb
+        else:
+            self.embedding_drop = nn.Embedding(1, hidden_size)
 
         self.mlp = nn.Sequential(
             nn.Linear(input_size, hidden_size, bias=True),
